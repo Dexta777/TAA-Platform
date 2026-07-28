@@ -1,0 +1,7 @@
+node_modules/
+dist/
+supabase/.temp/
+supabase/.branches/
+*.min.js
+*.min.css
+package-lock.json

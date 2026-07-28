@@ -8,7 +8,9 @@ dist/
 .DS_Store
 *.log
 
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 .idea/
 xcuserdata/
 
