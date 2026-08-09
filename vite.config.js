@@ -9,7 +9,7 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     manifest: true,
-    rollupOptions: {
+    rolldownOptions: {
       input: applicationEntry,
       output: {
         entryFileNames: 'taa-platform.js',

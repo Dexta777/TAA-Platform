@@ -30,6 +30,8 @@ application would not be sufficient if legacy handlers could still bind undernea
 Run `npm run build` with the required browser-safe Vite environment variables supplied by the
 release environment. The build uses `src/main.js` as its JavaScript entry and produces:
 
+### Local build output
+
 ```text
 dist/
 ├── taa-platform.js
@@ -42,14 +44,26 @@ dist/
 `taa-platform.js` is the stable application entry. Lazy and shared chunks use content-hashed
 names. The relative asset base keeps imports within the deployed release tree and avoids coupling
 the build to a hosting provider or domain. The manifest is deployment metadata only; the browser
-application does not consume it.
+application does not consume it. It may remain local build metadata, CI/deployment metadata, or
+release verification metadata. It does not need to be publicly served unless a future deployment
+system deliberately consumes it from the public asset origin.
 
 Do not commit `dist/`. Do not place service-role keys, Stripe secret keys, database passwords, or
 private Klaviyo keys in Vite variables. Only browser-safe configuration may enter a browser build.
 
-## Immutable release contract
+## Public immutable browser release
 
-Publish every build as one complete, immutable release:
+The public browser release contains the stable entry and every matching lazy/shared chunk:
+
+```text
+<release-id>/
+├── taa-platform.js
+└── assets/
+    └── ...
+```
+
+`.vite/manifest.json` is not part of the required browser runtime. Publish every browser build as
+one complete, immutable release under a provider-neutral structure such as:
 
 ```text
 <asset-origin>/
@@ -99,7 +113,8 @@ provider-specific configuration are separate decisions.
 ### Phase A — Build and host one release
 
 1. Build one complete modular release with its browser-safe environment configuration.
-2. Upload `taa-platform.js`, all `assets/` chunks, and deployment metadata together.
+2. Upload `taa-platform.js` and all `assets/` chunks together. Retain the manifest for release
+   verification; it does not need to be public.
 3. Verify that the entry and every manifest-referenced file exist and return successful responses.
 4. Verify that the entry resolves its lazy chunks within the same release directory.
 
