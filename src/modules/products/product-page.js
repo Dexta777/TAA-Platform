@@ -95,10 +95,16 @@ function initialiseVariantSelector(state, elements) {
       elements.variantWrapper.style.display = 'none';
     }
 
-    return;
+    return true;
   }
 
-  if (!elements.variantSelect || !elements.variantWrapper) return;
+  if (!elements.variantSelect || !elements.variantWrapper) {
+    console.error(
+      'Variant selector UI is unavailable: products with variants require both ' +
+        '[data-commerce-field="variant"] and [data-variant-wrapper].'
+    );
+    return false;
+  }
 
   elements.variantWrapper.style.display = '';
   elements.variantSelect.innerHTML = '';
@@ -122,6 +128,8 @@ function initialiseVariantSelector(state, elements) {
 
     renderProductState(state, elements);
   });
+
+  return true;
 }
 
 function createProductPageController(state) {
@@ -178,12 +186,19 @@ export async function initProductPage() {
     state.variants = await getActiveVariantsByProductId(state.product.id);
   } catch (error) {
     console.error('Product variants lookup failed:', error);
-    state.variants = [];
+    renderProductUnavailable(elements);
+    return null;
   }
 
   state.selectedVariant = state.variants[0] || null;
 
-  initialiseVariantSelector(state, elements);
+  const variantUiReady = initialiseVariantSelector(state, elements);
+
+  if (!variantUiReady) {
+    renderProductUnavailable(elements);
+    return null;
+  }
+
   renderProductState(state, elements);
 
   return createProductPageController(state);
