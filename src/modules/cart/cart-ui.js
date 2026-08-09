@@ -132,6 +132,7 @@ function bindAddToCartButton() {
 
     const selection = activeProductController?.getSelection();
     const quantityInput = document.querySelector('[data-commerce-field="quantity"]');
+    const quantity = quantityInput ? quantityInput.value : 1;
 
     if (!selection) {
       showProductMessage('This product is currently unavailable.', 'error');
@@ -139,7 +140,7 @@ function bindAddToCartButton() {
     }
 
     try {
-      addCartItem(selection, quantityInput?.value ?? '');
+      addCartItem(selection, quantity);
       showProductMessage('', 'info');
       openCartDrawer();
     } catch (error) {
