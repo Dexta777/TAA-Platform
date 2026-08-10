@@ -382,6 +382,24 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
+# These browser-facing functions perform request validation and, where sensitive,
+# their own authorization or capability checks.
+[functions.create-checkout-session]
+verify_jwt = false
+
+[functions.get-checkout-confirmation]
+verify_jwt = false
+
+[functions.get-shipping-options]
+verify_jwt = false
+
+[functions.update-checkout-details]
+verify_jwt = false
+
+# Stripe authenticates webhook requests with its endpoint signature.
+[functions.stripe-webhook]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 

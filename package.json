@@ -37,6 +37,7 @@
   },
   "type": "module",
   "dependencies": {
+    "@stripe/stripe-js": "9.13.0",
     "@supabase/supabase-js": "^2.112.2"
   }
 }
