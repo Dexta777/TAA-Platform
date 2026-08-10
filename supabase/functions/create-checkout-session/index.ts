@@ -159,6 +159,9 @@ serve(async (request) => {
     const session = await stripe.checkout.sessions.create({
       ui_mode: 'elements',
       mode: 'payment',
+      phone_number_collection: {
+        enabled: true,
+      },
       return_url: CHECKOUT_RETURN_URL,
       line_items: validatedItems.map((item) => ({
         quantity: item.quantity,
