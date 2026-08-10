@@ -1,7 +1,7 @@
 import { clearCart } from '../cart/cart.js';
 import { refreshCartUi } from '../cart/cart-ui.js';
 import { getCheckoutConfirmation } from '../../services/supabase/checkout.js';
-import { getCheckoutCapability, removeCheckoutCapability } from './checkout-capability.js';
+import { getCheckoutCapability } from './checkout-capability.js';
 
 const MAX_CONFIRMATION_ATTEMPTS = 8;
 const CONFIRMATION_RETRY_DELAY_MS = 1500;
@@ -147,7 +147,6 @@ export async function initOrderConfirmation() {
     const result = await loadConfirmation(checkoutSessionId, capability?.confirmationToken || null);
 
     renderConfirmation(result.order, result.items || []);
-    removeCheckoutCapability(checkoutSessionId);
     clearCart();
     refreshCartUi();
 
