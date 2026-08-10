@@ -179,7 +179,15 @@ export async function initCheckout() {
 
       paymentElementWrapper.replaceChildren();
 
-      const paymentElement = checkout.createPaymentElement({ layout: 'tabs' });
+      const paymentElement = checkout.createPaymentElement({
+        layout: 'tabs',
+        fields: {
+          billingDetails: {
+            name: 'never',
+            address: 'never',
+          },
+        },
+      });
       paymentElement.mount(paymentElementWrapper);
 
       checkout.on('change', (session) => {
