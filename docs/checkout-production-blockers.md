@@ -31,3 +31,31 @@ appropriate rate-limiting and abuse-protection layer.
 The current permissive CORS policy must also be restricted to approved TAA production and staging
 origins before production cutover. CORS is browser defence-in-depth only; it is not authentication
 and does not prevent direct requests to a public Edge Function.
+
+## Discount entitlement concurrency
+
+Limited-redemption and first-time-buyer discounts require atomic entitlement reservation before
+live use. Without reservation and compensation, simultaneous checkouts can both pass eligibility
+checks before either redemption is persisted. The final discount flow must reserve entitlement for
+a bounded period and release it when checkout expires or payment fails, analogous to the inventory
+race above.
+
+## First-time-buyer fingerprint readiness
+
+Identity fingerprinting is secondary anti-abuse infrastructure. Its failure must not prevent a
+successfully paid checkout from becoming an order; paid-order finalization continues with null
+fingerprints and an operational warning when the Vault pepper is unavailable.
+
+First-time-buyer and other identity-limited discount eligibility must fail closed independently.
+If a discount requires account, email, phone, or household history and the required current
+fingerprints cannot be generated—or historical paid-order fingerprint coverage is incomplete—the
+discount must be rejected or shown as unavailable. General checkout must remain available without
+that discount.
+
+Before enabling any first-time-buyer or identity-limited code:
+
+1. Provision the named identity fingerprint pepper in Supabase Vault.
+2. Complete the historical paid-order fingerprint backfill.
+3. Verify that no applicable paid order is missing any required fingerprint.
+4. Ensure entitlement validation rejects the discount whenever fingerprint infrastructure or
+   historical coverage is unhealthy.
