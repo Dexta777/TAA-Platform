@@ -58,7 +58,7 @@ export function createCheckoutSummary(root) {
   function renderDiscount(discount, shippingOption, currency = 'GBP') {
     const display = getCheckoutDiscountDisplay(discount, shippingOption);
 
-    discountRow?.classList.toggle('is-visible', display.visible);
+    if (discountRow) discountRow.hidden = !display.visible;
     if (discountCodeElement) discountCodeElement.textContent = display.code;
     if (discountLabelElement) discountLabelElement.textContent = display.label;
     if (discountAmountElement) {

@@ -8,41 +8,11 @@ import {
 } from './checkout-discount.js';
 import { createCheckoutSummary, getCheckoutDiscountDisplay } from './checkout-summary.js';
 
-class FakeClassList {
-  constructor(classes = []) {
-    this.classes = new Set(classes);
-  }
-
-  add(...classes) {
-    classes.forEach((className) => this.classes.add(className));
-  }
-
-  contains(className) {
-    return this.classes.has(className);
-  }
-
-  remove(...classes) {
-    classes.forEach((className) => this.classes.delete(className));
-  }
-
-  toggle(className, force) {
-    const shouldAdd = force === undefined ? !this.contains(className) : Boolean(force);
-
-    if (shouldAdd) {
-      this.add(className);
-    } else {
-      this.remove(className);
-    }
-
-    return shouldAdd;
-  }
-}
-
 class FakeElement {
   constructor(attributes = {}) {
     this.attributes = new Map(Object.entries(attributes));
     this.children = [];
-    this.classList = new FakeClassList();
+    this.className = '';
     this.disabled = false;
     this.hidden = false;
     this.listeners = new Map();
@@ -66,7 +36,7 @@ class FakeElement {
 
   cloneNode(deep = false) {
     const clone = new FakeElement(Object.fromEntries(this.attributes));
-    clone.classList = new FakeClassList(this.classList.classes);
+    clone.className = this.className;
     clone.disabled = this.disabled;
     clone.hidden = this.hidden;
     clone.style = { ...this.style };
@@ -139,7 +109,8 @@ function createDiscountFixture({ includeSuccess = false, partial = false } = {})
     new FakeElement({ 'data-applied-discount-template': 'true' })
   );
   template.hidden = true;
-  template.style.display = 'none';
+  template.className = 'applied-discount-row webflow-layout';
+  template.style = { gap: '0.5rem' };
   template.appendChild(new FakeElement({ 'data-applied-discount-code': 'true' }));
   template.appendChild(new FakeElement({ 'data-applied-discount-remove': 'true' }));
   const success = includeSuccess
@@ -157,6 +128,8 @@ function getGeneratedRows(wrapper) {
 function createSummaryFixture() {
   const root = new FakeElement();
   const discountRow = root.appendChild(new FakeElement({ 'data-checkout-discount-row': 'true' }));
+  discountRow.className = 'checkout-summary-row webflow-layout';
+  discountRow.style = { alignItems: 'center' };
   const discountAmount = discountRow.appendChild(
     new FakeElement({ 'data-checkout-discount': 'true' })
   );
@@ -260,6 +233,7 @@ test('successful application clears input and renders one generated row from the
     onApply: async (code) => controller.setAppliedDiscount({ code }),
     onRemove: async () => {},
   });
+  assert.equal(fixture.error.hidden, true);
   fixture.input.value = '  save10  ';
 
   await fixture.apply.dispatch('click');
@@ -271,9 +245,11 @@ test('successful application clears input and renders one generated row from the
   assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'SAVE10');
   assert.equal(fixture.template.attributes.get('data-applied-discount-template'), 'true');
   assert.equal(fixture.template.hidden, true);
-  assert.equal(fixture.template.classList.contains('is-visible'), false);
-  assert.equal(rows[0].classList.contains('is-visible'), true);
-  assert.equal(fixture.error.classList.contains('is-visible'), false);
+  assert.equal(rows[0].attributes.has('data-applied-discount-template'), false);
+  assert.equal(rows[0].hidden, false);
+  assert.equal(rows[0].className, fixture.template.className);
+  assert.deepEqual(rows[0].style, fixture.template.style);
+  assert.equal(fixture.error.hidden, true);
 });
 
 test('successful replacement renders only the replacement code', async () => {
@@ -290,7 +266,7 @@ test('successful replacement renders only the replacement code', async () => {
 
   const rows = getGeneratedRows(fixture.wrapper);
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].classList.contains('is-visible'), true);
+  assert.equal(rows[0].hidden, false);
   assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'SECOND');
   assert.deepEqual(controller.getAppliedDiscount(), { code: 'SECOND' });
 });
@@ -317,11 +293,11 @@ test('failed replacement preserves the applied row and entered code', async () =
     assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'FIRST');
     assert.equal(fixture.input.value, 'BADCODE');
     assert.equal(fixture.error.textContent, 'This discount code is not valid.');
-    assert.equal(fixture.error.classList.contains('is-visible'), true);
+    assert.equal(fixture.error.hidden, false);
 
     controller.setAppliedDiscount({ code: 'FIRST' });
     assert.equal(fixture.error.textContent, '');
-    assert.equal(fixture.error.classList.contains('is-visible'), false);
+    assert.equal(fixture.error.hidden, true);
   } finally {
     console.error = originalConsoleError;
   }
@@ -344,7 +320,7 @@ test('generated remove control clears the applied row after successful removal',
   assert.equal(removeCalls, 1);
   assert.equal(getGeneratedRows(fixture.wrapper).length, 0);
   assert.equal(fixture.template.attributes.get('data-applied-discount-template'), 'true');
-  assert.equal(fixture.template.classList.contains('is-visible'), false);
+  assert.equal(fixture.template.hidden, true);
   assert.equal(controller.getAppliedDiscount(), null);
 });
 
@@ -355,20 +331,22 @@ test('optional success element still displays apply and removal messages', async
     onApply: async (code) => controller.setAppliedDiscount({ code }),
     onRemove: async () => {},
   });
+  assert.equal(fixture.success.hidden, true);
+  assert.equal(fixture.error.hidden, true);
   fixture.input.value = 'save10';
 
   await fixture.apply.dispatch('click');
 
   assert.equal(fixture.success.textContent, 'SAVE10 has been applied.');
-  assert.equal(fixture.success.classList.contains('is-visible'), true);
-  assert.equal(fixture.error.classList.contains('is-visible'), false);
+  assert.equal(fixture.success.hidden, false);
+  assert.equal(fixture.error.hidden, true);
 
   const generatedRow = getGeneratedRows(fixture.wrapper)[0];
   await generatedRow.querySelector('[data-applied-discount-remove="true"]').dispatch('click');
 
   assert.equal(fixture.success.textContent, 'Discount code removed.');
-  assert.equal(fixture.success.classList.contains('is-visible'), true);
-  assert.equal(fixture.error.classList.contains('is-visible'), false);
+  assert.equal(fixture.success.hidden, false);
+  assert.equal(fixture.error.hidden, true);
 });
 
 test('busy state disables input, apply, and generated remove without hiding its row', () => {
@@ -385,14 +363,16 @@ test('busy state disables input, apply, and generated remove without hiding its 
   assert.equal(fixture.input.disabled, true);
   assert.equal(fixture.apply.disabled, true);
   assert.equal(remove.disabled, true);
-  assert.equal(generatedRow.classList.contains('is-visible'), true);
+  assert.equal(generatedRow.hidden, false);
 });
 
-test('summary row toggles semantic visibility for active and absent discounts', () => {
+test('summary row toggles hidden state without changing Webflow layout styling', () => {
   const fixture = createSummaryFixture();
   const summary = createCheckoutSummary(fixture.root);
 
-  assert.equal(fixture.discountRow.classList.contains('is-visible'), false);
+  assert.equal(fixture.discountRow.hidden, true);
+  assert.equal(fixture.discountRow.className, 'checkout-summary-row webflow-layout');
+  assert.deepEqual(fixture.discountRow.style, { alignItems: 'center' });
 
   summary.renderDiscount({
     code: 'SAVE10',
@@ -401,12 +381,14 @@ test('summary row toggles semantic visibility for active and absent discounts', 
     shipping_discount_amount: 0,
   });
 
-  assert.equal(fixture.discountRow.classList.contains('is-visible'), true);
+  assert.equal(fixture.discountRow.hidden, false);
   assert.equal(fixture.discountAmount.textContent, '-£1.90');
+  assert.equal(fixture.discountRow.className, 'checkout-summary-row webflow-layout');
+  assert.deepEqual(fixture.discountRow.style, { alignItems: 'center' });
 
   summary.renderDiscount(null);
 
-  assert.equal(fixture.discountRow.classList.contains('is-visible'), false);
+  assert.equal(fixture.discountRow.hidden, true);
   assert.equal(fixture.discountAmount.textContent, '');
 });
 

@@ -75,7 +75,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     if (!element) return;
 
     element.textContent = '';
-    element.classList.remove('is-visible');
+    element.hidden = true;
   }
 
   function clearMessages() {
@@ -92,7 +92,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     if (!successElement) return;
 
     successElement.textContent = message;
-    successElement.classList.add('is-visible');
+    successElement.hidden = false;
   }
 
   function showErrorMessage(message) {
@@ -101,7 +101,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     hideMessage(successElement);
 
     errorElement.textContent = message;
-    errorElement.classList.add('is-visible');
+    errorElement.hidden = false;
   }
 
   function setControlBusy(control) {
@@ -143,7 +143,6 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
       row.removeAttribute('data-applied-discount-template');
       row.setAttribute('data-applied-discount-generated', 'true');
       row.hidden = false;
-      row.classList.add('is-visible');
 
       if (codeElement) codeElement.textContent = normalizeDiscountCode(discount.code);
       setControlBusy(removeControl);
