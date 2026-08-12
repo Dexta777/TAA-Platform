@@ -91,7 +91,7 @@ class FakeElement {
   }
 }
 
-function createDiscountFixture({ partial = false } = {}) {
+function createDiscountFixture({ includeSuccess = false, partial = false } = {}) {
   const root = new FakeElement();
   const input = root.appendChild(new FakeElement({ 'data-discount-code': 'true' }));
 
@@ -106,7 +106,9 @@ function createDiscountFixture({ partial = false } = {}) {
   template.style.display = 'none';
   template.appendChild(new FakeElement({ 'data-applied-discount-code': 'true' }));
   template.appendChild(new FakeElement({ 'data-applied-discount-remove': 'true' }));
-  const success = root.appendChild(new FakeElement({ 'data-discount-success': 'true' }));
+  const success = includeSuccess
+    ? root.appendChild(new FakeElement({ 'data-discount-success': 'true' }))
+    : null;
   const error = root.appendChild(new FakeElement({ 'data-discount-error': 'true' }));
 
   return { apply, error, input, root, success, template, wrapper };
@@ -217,12 +219,12 @@ test('successful application clears input and renders one generated row from the
   await fixture.apply.dispatch('click');
 
   const rows = getGeneratedRows(fixture.wrapper);
+  assert.equal(controller.available, true);
   assert.equal(fixture.input.value, '');
   assert.equal(rows.length, 1);
   assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'SAVE10');
   assert.equal(fixture.template.attributes.get('data-applied-discount-template'), 'true');
   assert.equal(fixture.template.hidden, true);
-  assert.equal(fixture.success.textContent, 'SAVE10 has been applied.');
   assert.equal(fixture.error.style.display, 'none');
 });
 
@@ -266,7 +268,6 @@ test('failed replacement preserves the applied row and entered code', async () =
     assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'FIRST');
     assert.equal(fixture.input.value, 'BADCODE');
     assert.equal(fixture.error.textContent, 'This discount code is not valid.');
-    assert.equal(fixture.success.style.display, 'none');
   } finally {
     console.error = originalConsoleError;
   }
@@ -289,8 +290,28 @@ test('generated remove control clears the applied row after successful removal',
   assert.equal(removeCalls, 1);
   assert.equal(getGeneratedRows(fixture.wrapper).length, 0);
   assert.equal(fixture.template.attributes.get('data-applied-discount-template'), 'true');
-  assert.equal(fixture.success.textContent, 'Discount code removed.');
   assert.equal(controller.getAppliedDiscount(), null);
+});
+
+test('optional success element still displays apply and removal messages', async () => {
+  const fixture = createDiscountFixture({ includeSuccess: true });
+  let controller;
+  controller = createCheckoutDiscount(fixture.root, {
+    onApply: async (code) => controller.setAppliedDiscount({ code }),
+    onRemove: async () => {},
+  });
+  fixture.input.value = 'save10';
+
+  await fixture.apply.dispatch('click');
+
+  assert.equal(fixture.success.textContent, 'SAVE10 has been applied.');
+  assert.equal(fixture.error.style.display, 'none');
+
+  const generatedRow = getGeneratedRows(fixture.wrapper)[0];
+  await generatedRow.querySelector('[data-applied-discount-remove="true"]').dispatch('click');
+
+  assert.equal(fixture.success.textContent, 'Discount code removed.');
+  assert.equal(fixture.error.style.display, 'none');
 });
 
 test('busy state disables input, apply, and generated remove without hiding its row', () => {

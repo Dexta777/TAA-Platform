@@ -55,11 +55,10 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     applyControl,
     appliedDiscountsWrapper,
     appliedDiscountTemplate,
-    successElement,
     errorElement,
   ];
   const hasAnyDiscountUi = Boolean(
-    requiredElements.some(Boolean) || discoveredAppliedDiscountTemplate
+    requiredElements.some(Boolean) || discoveredAppliedDiscountTemplate || successElement
   );
   const ready = requiredElements.every(Boolean);
   let requestedCode = '';
@@ -68,7 +67,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
 
   if (hasAnyDiscountUi && !ready) {
     console.error(
-      'Discount UI requires [data-discount-code="true"], [data-discount-apply="true"], [data-applied-discounts="true"], [data-applied-discount-template="true"], [data-discount-success="true"], and [data-discount-error="true"].'
+      'Discount UI requires [data-discount-code="true"], [data-discount-apply="true"], [data-applied-discounts="true"], [data-applied-discount-template="true"], and [data-discount-error="true"].'
     );
   }
 
@@ -90,6 +89,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     if (!ready) return;
 
     hideMessage(errorElement);
+    if (!successElement) return;
 
     successElement.textContent = message;
     successElement.style.display = message ? '' : 'none';
