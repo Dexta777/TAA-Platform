@@ -47,3 +47,49 @@ Percentage discounts use PostgreSQL numeric arithmetic and explicit rounding fro
 points, with optional maximum-discount and subtotal caps. Fixed discounts cannot exceed the
 subtotal. Free shipping records the original shipping as `shipping_discount_amount` and reduces
 `final_shipping_amount` to zero.
+
+## Checkout execution
+
+`create-checkout-session` accepts only an optional human-entered `discount_code`. It resolves the
+cart, merchandise subtotal, eligible shipping options, selected shipping method, and authenticated
+identity on the server before calling the evaluator. An ineligible result is mapped to a small
+customer-safe error category and no Stripe Checkout Session is created. Checkout without a code
+continues through the existing undiscounted path.
+
+Canonical integer-pence snapshots use these meanings:
+
+- `subtotal_amount`: merchandise before discount
+- `discount_amount`: merchandise discount
+- `shipping_amount`: shipping actually charged for the final selected method
+- `shipping_discount_amount`: original canonical shipping waived
+- `total_amount`: `subtotal_amount - discount_amount + shipping_amount`
+
+For percentage and fixed discounts, Stripe receives a unique, once-only amount-off coupon for the
+evaluator's exact `discount_amount`; Stripe never recalculates TAA eligibility or percentage rules.
+The coupon ID is retained on `checkout_intents` for diagnosis and cleanup. Coupon deletion is
+best-effort after terminal Checkout Session handling and does not affect an already-applied Session.
+Session-creation and persistence failures expire the Session and delete the coupon best-effort
+without allowing cleanup errors to hide the primary result.
+
+Free shipping does not create a coupon. Every canonical shipping option in that Session is created
+with a zero Stripe amount, while its original canonical amount and TAA method/rate identifiers are
+stored in server-created Stripe shipping-rate metadata. The webhook therefore records the method
+the customer actually selected and derives the waived amount without trusting browser state.
+
+Discounted paid Sessions are reconciled before order finalization. Stripe proves the merchandise
+subtotal, aggregate merchandise discount, selected shipping charge, currency, and total; the
+selected server-created shipping rate proves the canonical original shipping amount. Any mismatch
+is treated as a high-severity finalization error and no order is silently created. Undiscounted
+Checkout Session synchronization retains its existing behavior.
+
+`public.finalize_paid_checkout` atomically copies the discount snapshot to the paid order and, when
+`discount_code_id` is present, inserts exactly one `discount_redemptions` row from the finalized
+order's identity fingerprints. Pending, declined, failed, expired, and abandoned checkouts do not
+consume a redemption. Replay returns the existing order without decrementing inventory or creating
+a second redemption. Nullable fingerprints remain acceptable for unrestricted discounts when the
+secondary fingerprint infrastructure is degraded.
+
+This Slice intentionally does not connect a browser discount field. Limited-redemption and
+first-time-buyer codes remain production-blocked: paid-order redemption persistence is not an
+entitlement reservation, so simultaneous eligible Sessions can still race. Reservation and
+compensation must be implemented before those codes are enabled.

@@ -1,6 +1,11 @@
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import Stripe from 'npm:stripe@22.4.0';
 import { createClient } from 'npm:@supabase/supabase-js@2.112.2';
+import {
+  CheckoutEconomicsMismatchError,
+  parseOriginalShippingAmount,
+  reconcilePaidDiscountEconomics,
+} from '../_shared/checkout-discounts.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 
@@ -24,6 +29,55 @@ const supabase = createClient(
 
 function getResourceId(resource: string | { id: string } | null) {
   return typeof resource === 'string' ? resource : resource?.id || null;
+}
+
+function getStripeErrorDetails(error: unknown) {
+  if (!error || typeof error !== 'object') return {};
+
+  const stripeError = error as { code?: string; type?: string };
+
+  return {
+    error_type: stripeError.type || 'unknown',
+    error_code: stripeError.code || 'unknown',
+  };
+}
+
+async function deleteTemporaryCouponBestEffort(couponId: string | null, context: string) {
+  if (!couponId) return;
+
+  try {
+    await stripe.coupons.del(couponId);
+  } catch (error) {
+    const details = getStripeErrorDetails(error);
+
+    if (details.error_code === 'resource_missing') return;
+
+    console.error('TEMPORARY STRIPE COUPON CLEANUP FAILED:', {
+      context,
+      coupon_id: couponId,
+      ...details,
+    });
+  }
+}
+
+async function cleanupTemporaryCouponForSession(checkoutSessionId: string, context: string) {
+  try {
+    const { data: checkoutIntent, error } = await supabase
+      .from('checkout_intents')
+      .select('stripe_coupon_id')
+      .eq('stripe_checkout_session_id', checkoutSessionId)
+      .maybeSingle();
+
+    if (error) throw new Error('Temporary coupon lookup failed.');
+
+    await deleteTemporaryCouponBestEffort(checkoutIntent?.stripe_coupon_id || null, context);
+  } catch (error) {
+    console.error('TEMPORARY STRIPE COUPON CLEANUP LOOKUP FAILED:', {
+      context,
+      checkout_session_id: checkoutSessionId,
+      error_type: error instanceof Error ? error.name : 'unknown',
+    });
+  }
 }
 
 function splitName(name: string | null) {
@@ -256,7 +310,7 @@ async function updateCheckoutIntentFromSession(
   const { data: checkoutIntent, error: checkoutIntentError } = await supabase
     .from('checkout_intents')
     .select(
-      'id, user_id, shipping_name, shipping_phone, shipping_address, billing_name, billing_address, billing_is_different'
+      'id, user_id, shipping_name, shipping_phone, shipping_address, billing_name, billing_address, billing_is_different, subtotal_amount, shipping_amount, total_amount, discount_code_id, discount_code, discount_amount, shipping_discount_amount, stripe_coupon_id'
     )
     .eq('stripe_checkout_session_id', session.id)
     .single();
@@ -301,6 +355,53 @@ async function updateCheckoutIntentFromSession(
     throw new Error('Completed Checkout Session is missing required fulfillment data.');
   }
 
+  const stripeShippingAmount = session.shipping_cost?.amount_total ?? 0;
+  const hasTaaDiscount = Boolean(
+    checkoutIntent.discount_code_id ||
+    checkoutIntent.discount_code ||
+    checkoutIntent.stripe_coupon_id ||
+    Number(checkoutIntent.discount_amount) > 0 ||
+    Number(checkoutIntent.shipping_discount_amount) > 0
+  );
+  let synchronizedEconomics = {
+    subtotalAmount: session.amount_subtotal,
+    shippingAmount: stripeShippingAmount,
+    shippingDiscountAmount: Number(checkoutIntent.shipping_discount_amount) || 0,
+    totalAmount: session.amount_total,
+  };
+
+  if (hasTaaDiscount) {
+    try {
+      synchronizedEconomics = reconcilePaidDiscountEconomics({
+        actual: {
+          amountSubtotal: session.amount_subtotal,
+          amountDiscount: session.total_details?.amount_discount ?? null,
+          shippingAmount: session.shipping_cost?.amount_total ?? null,
+          amountTotal: session.amount_total,
+          currency: session.currency,
+        },
+        stored: {
+          subtotalAmount: Number(checkoutIntent.subtotal_amount),
+          discountAmount: Number(checkoutIntent.discount_amount),
+          shippingDiscountAmount: Number(checkoutIntent.shipping_discount_amount),
+        },
+        originalShippingAmount: parseOriginalShippingAmount(
+          shippingRate.metadata.original_shipping_amount
+        ),
+      });
+    } catch (error) {
+      if (error instanceof CheckoutEconomicsMismatchError) {
+        console.error('HIGH SEVERITY: PAID CHECKOUT ECONOMICS MISMATCH:', {
+          checkout_session_id: session.id,
+          checkout_intent_id: checkoutIntent.id,
+          ...error.details,
+        });
+      }
+
+      throw new Error('Paid Checkout Session economics could not be reconciled.');
+    }
+  }
+
   const stripeCustomerId = getResourceId(session.customer);
   const paymentIntentId = paymentIntent?.id || null;
   const { error: updateError } = await supabase
@@ -316,9 +417,10 @@ async function updateCheckoutIntentFromSession(
         ? checkoutIntent.billing_name
         : customerDetails?.name || shippingDetails.name,
       billing_address: billingAddress,
-      subtotal_amount: session.amount_subtotal,
-      shipping_amount: session.shipping_cost?.amount_total || 0,
-      total_amount: session.amount_total,
+      subtotal_amount: synchronizedEconomics.subtotalAmount,
+      shipping_amount: synchronizedEconomics.shippingAmount,
+      shipping_discount_amount: synchronizedEconomics.shippingDiscountAmount,
+      total_amount: synchronizedEconomics.totalAmount,
       currency: session.currency || 'gbp',
       shipping_method_name: shippingMethodName,
       shipping_method_id: shippingMethodId,
@@ -351,8 +453,8 @@ async function fulfillCheckoutSession(checkoutSessionId: string) {
   });
 
   if (
-    session.metadata.source !== 'the_animal_alchemist_webflow' ||
-    !session.metadata.checkout_intent_id
+    session.metadata?.source !== 'the_animal_alchemist_webflow' ||
+    !session.metadata?.checkout_intent_id
   ) {
     console.log('Checkout Session does not belong to the TAA checkout flow:', session.id);
     return null;
@@ -448,17 +550,32 @@ serve(async (request) => {
       case 'checkout.session.completed':
       case 'checkout.session.async_payment_succeeded': {
         const session = event.data.object as Stripe.Checkout.Session;
-        await fulfillCheckoutSession(session.id);
+
+        try {
+          await fulfillCheckoutSession(session.id);
+        } finally {
+          await cleanupTemporaryCouponForSession(session.id, event.type);
+        }
         break;
       }
       case 'checkout.session.async_payment_failed': {
         const session = event.data.object as Stripe.Checkout.Session;
-        await updateCheckoutSessionStatus(session.id, 'failed');
+
+        try {
+          await updateCheckoutSessionStatus(session.id, 'failed');
+        } finally {
+          await cleanupTemporaryCouponForSession(session.id, event.type);
+        }
         break;
       }
       case 'checkout.session.expired': {
         const session = event.data.object as Stripe.Checkout.Session;
-        await updateCheckoutSessionStatus(session.id, 'expired');
+
+        try {
+          await updateCheckoutSessionStatus(session.id, 'expired');
+        } finally {
+          await cleanupTemporaryCouponForSession(session.id, event.type);
+        }
         break;
       }
       case 'payment_intent.succeeded': {
