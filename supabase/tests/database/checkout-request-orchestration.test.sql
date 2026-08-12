@@ -2,7 +2,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(44);
+SELECT plan(50);
 
 SELECT has_column(
   'public',
@@ -579,12 +579,26 @@ SELECT ok(
 SELECT ok(
   (
     SELECT status = 'expired'
+      AND orchestration_state = 'superseded'
       AND confirmation_token_hash IS NULL
       AND confirmation_token_expires_at IS NULL
     FROM public.checkout_intents
     WHERE id = (SELECT id FROM orchestration_test_ids WHERE name = 'initial')
   ),
-  'replacement activation expires A and clears its confirmation capability'
+  'replacement activation supersedes A and clears its confirmation capability'
+);
+
+SELECT ok(
+  (
+    SELECT initial.confirmation_generation = 2
+      AND replacement.confirmation_generation = 1
+      AND initial.checkout_request_id <> replacement.checkout_request_id
+    FROM public.checkout_intents AS initial
+    JOIN public.checkout_intents AS replacement
+      ON replacement.id = (SELECT id FROM orchestration_test_ids WHERE name = 'replacement')
+    WHERE initial.id = (SELECT id FROM orchestration_test_ids WHERE name = 'initial')
+  ),
+  'confirmation generation is scoped to each checkout intent and request identity'
 );
 
 SELECT throws_ok(
@@ -662,16 +676,176 @@ SELECT ok(
     SELECT intents.orchestration_state = 'compensated'
       AND attempts.active_checkout_intent_id = replacement.id
       AND attempts.in_flight_checkout_intent_id IS NULL
+      AND active_intent.orchestration_state = 'active'
       AND reservations.status = 'held'
     FROM orchestration_test_ids AS ids
     JOIN public.checkout_intents AS intents ON intents.id = ids.id
     JOIN public.checkout_attempts AS attempts ON attempts.id = intents.checkout_attempt_id
     JOIN orchestration_test_ids AS replacement ON replacement.name = 'replacement'
+    JOIN public.checkout_intents AS active_intent ON active_intent.id = replacement.id
     JOIN public.inventory_reservations AS reservations
       ON reservations.checkout_attempt_id = attempts.id
     WHERE ids.name = 'compensation'
   ),
-  'safe B compensation retains active A and its held reservation'
+  'an expired replacement B is compensated while A remains active with held stock'
+);
+
+INSERT INTO orchestration_test_ids (name, id)
+SELECT 'expired_initial', checkout_intent_id
+FROM public.prepare_checkout_request(
+  '92000000-0000-0000-0000-000000000002',
+  '93000000-0000-0000-0000-000000000101',
+  NULL,
+  repeat('f', 64),
+  repeat('1', 64),
+  NULL,
+  '94000000-0000-0000-0000-000000000101',
+  clock_timestamp() + interval '29 minutes',
+  (SELECT snapshot FROM orchestration_test_snapshots),
+  (SELECT items FROM orchestration_test_snapshots),
+  (SELECT shipping_options FROM orchestration_test_snapshots)
+);
+
+DO $expired_initial_compensation$
+DECLARE
+  v_intent_id uuid;
+  v_expiry timestamp with time zone;
+BEGIN
+  SELECT id INTO v_intent_id
+  FROM orchestration_test_ids
+  WHERE name = 'expired_initial';
+
+  PERFORM * FROM public.begin_checkout_session_creation(
+    v_intent_id,
+    '94000000-0000-0000-0000-000000000101',
+    repeat('2', 64)
+  );
+
+  SELECT stripe_session_expires_at INTO v_expiry
+  FROM public.checkout_intents
+  WHERE id = v_intent_id;
+
+  PERFORM public.record_checkout_session(
+    v_intent_id,
+    '94000000-0000-0000-0000-000000000101',
+    'cs_test_orchestration_expired_initial',
+    v_expiry,
+    '[{"position":0,"stripe_shipping_rate_id":"shr_expired_initial"}]'::jsonb
+  );
+
+  PERFORM public.begin_checkout_compensation(
+    v_intent_id,
+    '94000000-0000-0000-0000-000000000101',
+    'new_session_expired_before_activation'
+  );
+  PERFORM public.complete_checkout_compensation(
+    v_intent_id,
+    '94000000-0000-0000-0000-000000000101'
+  );
+END;
+$expired_initial_compensation$;
+
+SELECT ok(
+  (
+    SELECT intents.orchestration_state = 'compensated'
+      AND attempts.status = 'failed'
+      AND attempts.active_checkout_intent_id IS NULL
+      AND attempts.in_flight_checkout_intent_id IS NULL
+      AND reservations.status = 'released'
+    FROM orchestration_test_ids AS ids
+    JOIN public.checkout_intents AS intents ON intents.id = ids.id
+    JOIN public.checkout_attempts AS attempts ON attempts.id = intents.checkout_attempt_id
+    JOIN public.inventory_reservations AS reservations
+      ON reservations.checkout_attempt_id = attempts.id
+    WHERE ids.name = 'expired_initial'
+  ),
+  'an expired initial Session is terminalized without becoming active and releases stock'
+);
+
+SELECT throws_ok(
+  format(
+    $$
+      SELECT public.activate_checkout_request(
+        %L::uuid,
+        '94000000-0000-0000-0000-000000000101',
+        %L,
+        clock_timestamp() + interval '24 hours'
+      )
+    $$,
+    (SELECT id FROM orchestration_test_ids WHERE name = 'expired_initial'),
+    repeat('3', 64)
+  ),
+  'P0001',
+  'Checkout request no longer owns the in-flight operation.',
+  'a terminalized non-payable initial Session cannot become active'
+);
+
+INSERT INTO orchestration_test_ids (name, id)
+SELECT 'idempotency_error', checkout_intent_id
+FROM public.prepare_checkout_request(
+  '92000000-0000-0000-0000-000000000003',
+  '93000000-0000-0000-0000-000000000201',
+  NULL,
+  repeat('e', 64),
+  repeat('4', 64),
+  NULL,
+  '94000000-0000-0000-0000-000000000201',
+  clock_timestamp() + interval '29 minutes',
+  (SELECT snapshot FROM orchestration_test_snapshots),
+  (SELECT items FROM orchestration_test_snapshots),
+  (SELECT shipping_options FROM orchestration_test_snapshots)
+);
+
+SELECT lives_ok(
+  format(
+    $$
+      SELECT public.mark_checkout_reconciliation_required(
+        %L::uuid,
+        '94000000-0000-0000-0000-000000000201',
+        'session_creation_idempotency_conflict'
+      )
+    $$,
+    (SELECT id FROM orchestration_test_ids WHERE name = 'idempotency_error')
+  ),
+  'a Stripe idempotency error transitions durably to reconciliation required'
+);
+
+SELECT ok(
+  (
+    SELECT intents.orchestration_state = 'reconciliation_required'
+      AND attempts.status = 'active'
+      AND attempts.in_flight_checkout_intent_id = intents.id
+      AND reservations.status = 'held'
+    FROM orchestration_test_ids AS ids
+    JOIN public.checkout_intents AS intents ON intents.id = ids.id
+    JOIN public.checkout_attempts AS attempts ON attempts.id = intents.checkout_attempt_id
+    JOIN public.inventory_reservations AS reservations
+      ON reservations.checkout_attempt_id = attempts.id
+    WHERE ids.name = 'idempotency_error'
+  ),
+  'a Stripe idempotency error preserves inventory and in-flight ownership'
+);
+
+SELECT throws_ok(
+  $$
+    SELECT *
+    FROM public.prepare_checkout_request(
+      '92000000-0000-0000-0000-000000000003',
+      '93000000-0000-0000-0000-000000000202',
+      NULL,
+      repeat('e', 64),
+      repeat('5', 64),
+      NULL,
+      '94000000-0000-0000-0000-000000000202',
+      clock_timestamp() + interval '29 minutes',
+      (SELECT snapshot FROM orchestration_test_snapshots),
+      (SELECT items FROM orchestration_test_snapshots),
+      (SELECT shipping_options FROM orchestration_test_snapshots)
+    )
+  $$,
+  'P0001',
+  'Checkout attempt already has an unresolved operation.',
+  'a Stripe idempotency error blocks a different checkout request'
 );
 
 INSERT INTO orchestration_test_ids (name, id)

@@ -85,7 +85,14 @@ export function isCheckoutReservationsEnabled(value: string | undefined) {
   return value?.trim().toLowerCase() === 'true';
 }
 
-export type StripeFailureKind = 'transport_ambiguous' | 'server_indeterminate' | 'definitive';
+export type StripeFailureKind =
+  | 'transport_ambiguous'
+  | 'server_indeterminate'
+  | 'external_state_indeterminate'
+  | 'retryable'
+  | 'definitive';
+
+export type StripeFailureAction = 'retry_same_request' | 'reconciliation_required' | 'fail_request';
 
 export function classifyStripeFailure(error: unknown): StripeFailureKind {
   if (!error || typeof error !== 'object') return 'definitive';
@@ -93,11 +100,25 @@ export function classifyStripeFailure(error: unknown): StripeFailureKind {
   const stripeError = error as { type?: string; statusCode?: number };
 
   if (stripeError.type === 'StripeConnectionError') return 'transport_ambiguous';
+  if (stripeError.type === 'StripeIdempotencyError') return 'external_state_indeterminate';
+  if (stripeError.type === 'StripeRateLimitError') return 'retryable';
   if (stripeError.type === 'StripeAPIError' || Number(stripeError.statusCode) >= 500) {
     return 'server_indeterminate';
   }
 
   return 'definitive';
+}
+
+export function getStripeFailureAction(failureKind: StripeFailureKind): StripeFailureAction {
+  if (failureKind === 'transport_ambiguous' || failureKind === 'retryable') {
+    return 'retry_same_request';
+  }
+
+  if (failureKind === 'server_indeterminate' || failureKind === 'external_state_indeterminate') {
+    return 'reconciliation_required';
+  }
+
+  return 'fail_request';
 }
 
 export function isStripeSessionSafelyExpired(session: {
@@ -114,11 +135,54 @@ export function isStripeSessionUsable(session: {
   return session.status === 'open' && session.payment_status === 'unpaid';
 }
 
+export type StripeSessionActivationDisposition =
+  'payable' | 'safely_expired' | 'external_state_indeterminate';
+
+export function getStripeSessionActivationDisposition(session: {
+  status?: string | null;
+  payment_status?: string | null;
+  client_secret?: string | null;
+}): StripeSessionActivationDisposition {
+  if (
+    session.status === 'open' &&
+    session.payment_status === 'unpaid' &&
+    Boolean(session.client_secret)
+  ) {
+    return 'payable';
+  }
+
+  if (isStripeSessionSafelyExpired(session)) return 'safely_expired';
+
+  return 'external_state_indeterminate';
+}
+
+export type StripeSessionActivationAction =
+  'activate' | 'terminalize_before_handoff' | 'reconciliation_required';
+
+export function getStripeSessionActivationAction(
+  session: {
+    status?: string | null;
+    payment_status?: string | null;
+    client_secret?: string | null;
+  },
+  replacementHandoffCompleted = false
+): StripeSessionActivationAction {
+  const disposition = getStripeSessionActivationDisposition(session);
+
+  if (disposition === 'payable') return 'activate';
+  if (disposition === 'safely_expired' && !replacementHandoffCompleted) {
+    return 'terminalize_before_handoff';
+  }
+
+  return 'reconciliation_required';
+}
+
 export function getStripeSessionResumeMode(snapshot: {
   orchestration_state: string;
   stripe_checkout_session_id: string | null;
 }) {
   if (snapshot.orchestration_state === 'active') return 'retrieve_active' as const;
+  if (snapshot.orchestration_state === 'superseded') return 'terminal' as const;
   if (snapshot.stripe_checkout_session_id) return 'retrieve_recorded' as const;
 
   return 'create_idempotently' as const;

@@ -5,7 +5,10 @@ import {
   classifyStripeFailure,
   deterministicStringify,
   fingerprintCheckoutCommand,
+  getStripeFailureAction,
   getStripeIdempotencyKeys,
+  getStripeSessionActivationAction,
+  getStripeSessionActivationDisposition,
   getStripeSessionResumeMode,
   isCheckoutReservationsEnabled,
   isStripeSessionSafelyExpired,
@@ -238,7 +241,79 @@ Deno.test('Stripe transport and server failures preserve their distinct retry se
     classifyStripeFailure({ type: 'StripeInvalidRequestError', statusCode: 400 }),
     'definitive'
   );
+  assertEquals(
+    classifyStripeFailure({ type: 'StripeIdempotencyError', statusCode: 400 }),
+    'external_state_indeterminate'
+  );
+  assertEquals(
+    getStripeFailureAction(
+      classifyStripeFailure({ type: 'StripeIdempotencyError', statusCode: 400 })
+    ),
+    'reconciliation_required'
+  );
+  assertEquals(
+    classifyStripeFailure({ type: 'StripeRateLimitError', statusCode: 429 }),
+    'retryable'
+  );
+  assertEquals(
+    getStripeFailureAction(classifyStripeFailure({ type: 'StripeRateLimitError' })),
+    'retry_same_request'
+  );
   assertEquals(isStripeSessionSafelyExpired({ status: 'expired', payment_status: 'unpaid' }), true);
+});
+
+Deno.test('only a currently open unpaid Elements Session is eligible for activation', () => {
+  assertEquals(
+    getStripeSessionActivationDisposition({
+      status: 'open',
+      payment_status: 'unpaid',
+      client_secret: 'cs_test_secret',
+    }),
+    'payable'
+  );
+  assertEquals(
+    getStripeSessionActivationDisposition({
+      status: 'expired',
+      payment_status: 'unpaid',
+      client_secret: null,
+    }),
+    'safely_expired'
+  );
+  assertEquals(
+    getStripeSessionActivationDisposition({
+      status: 'complete',
+      payment_status: 'paid',
+      client_secret: 'cs_test_secret',
+    }),
+    'external_state_indeterminate'
+  );
+  assertEquals(
+    getStripeSessionActivationDisposition({
+      status: 'open',
+      payment_status: 'unpaid',
+      client_secret: null,
+    }),
+    'external_state_indeterminate'
+  );
+  assertEquals(
+    getStripeSessionActivationAction({
+      status: 'expired',
+      payment_status: 'unpaid',
+      client_secret: null,
+    }),
+    'terminalize_before_handoff'
+  );
+  assertEquals(
+    getStripeSessionActivationAction(
+      {
+        status: 'expired',
+        payment_status: 'unpaid',
+        client_secret: null,
+      },
+      true
+    ),
+    'reconciliation_required'
+  );
 });
 
 Deno.test('recorded Session recovery retrieves the same Session after a lost response', () => {
@@ -254,6 +329,27 @@ Deno.test('recorded Session recovery retrieves the same Session after a lost res
   snapshot.orchestration_state = 'active';
 
   assertEquals(getStripeSessionResumeMode(snapshot), 'retrieve_active');
+
+  snapshot.orchestration_state = 'superseded';
+
+  assertEquals(getStripeSessionResumeMode(snapshot), 'terminal');
+});
+
+Deno.test('confirmation generation is scoped to its checkout intent identity', () => {
+  const firstIntent = fixtureSnapshot();
+  firstIntent.confirmation_generation = 4;
+  const replacementIntent = fixtureSnapshot();
+  replacementIntent.id = '40000000-0000-4000-8000-000000000002';
+  replacementIntent.checkout_request_id = '42000000-0000-4000-8000-000000000002';
+  replacementIntent.replaces_checkout_intent_id = firstIntent.id;
+  replacementIntent.confirmation_generation = 1;
+
+  assertEquals(
+    replacementIntent.confirmation_generation < firstIntent.confirmation_generation,
+    true
+  );
+  assertEquals(replacementIntent.id === firstIntent.id, false);
+  assertEquals(replacementIntent.checkout_request_id === firstIntent.checkout_request_id, false);
 });
 
 Deno.test(

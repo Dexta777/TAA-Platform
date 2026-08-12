@@ -36,7 +36,10 @@ import {
   CHECKOUT_WORKER_LEASE_RETRY_SECONDS,
   classifyStripeFailure,
   fingerprintCheckoutCommand,
+  getStripeFailureAction,
   getStripeIdempotencyKeys,
+  getStripeSessionActivationAction,
+  getStripeSessionActivationDisposition,
   getStripeSessionResumeMode,
   isCheckoutReservationsEnabled,
   isStripeSessionSafelyExpired,
@@ -382,10 +385,6 @@ function getRequiredAttemptToken(payload: Record<string, unknown>) {
   return token;
 }
 
-function isSessionReadyForClient(session: Stripe.Checkout.Session) {
-  return session.status === 'open' && session.payment_status === 'unpaid';
-}
-
 async function markReconciliationRequired(
   checkoutIntentId: string,
   workerLeaseId: string,
@@ -410,24 +409,30 @@ async function failDefinitiveCheckoutRequest(
   });
 }
 
-async function handleAmbiguousStripeFailure(
+async function handleStripeMutationFailure(
   error: unknown,
   checkoutIntentId: string,
   workerLeaseId: string,
-  operation: string
+  operation: string,
+  temporaryCouponId: string | null = null
 ): Promise<never> {
   const failureKind = classifyStripeFailure(error);
+  const failureAction = getStripeFailureAction(failureKind);
 
-  if (failureKind === 'transport_ambiguous') {
+  if (failureAction === 'retry_same_request') {
     throw new CheckoutProtocolRequestError(
       'Checkout preparation is still processing. Please retry.',
       503,
-      'stripe_result_ambiguous'
+      failureKind === 'retryable' ? 'stripe_rate_limited' : 'stripe_result_ambiguous'
     );
   }
 
-  if (failureKind === 'server_indeterminate') {
-    await markReconciliationRequired(checkoutIntentId, workerLeaseId, `${operation}_indeterminate`);
+  if (failureAction === 'reconciliation_required') {
+    const failureCode =
+      failureKind === 'external_state_indeterminate'
+        ? `${operation}_idempotency_conflict`
+        : `${operation}_indeterminate`;
+    await markReconciliationRequired(checkoutIntentId, workerLeaseId, failureCode);
 
     throw new CheckoutProtocolRequestError(
       'Checkout requires reconciliation before it can continue.',
@@ -437,6 +442,10 @@ async function handleAmbiguousStripeFailure(
   }
 
   await failDefinitiveCheckoutRequest(checkoutIntentId, workerLeaseId, `${operation}_failed`);
+
+  if (temporaryCouponId) {
+    await deleteTemporaryCouponBestEffort(temporaryCouponId, `${operation}_definitive_failure`);
+  }
 
   throw new CheckoutProtocolRequestError(
     'Unable to prepare Checkout.',
@@ -454,7 +463,7 @@ async function getProtocolCheckoutResponse(
     generation: number;
   }
 ) {
-  if (!isSessionReadyForClient(session) || !session.client_secret) {
+  if (getStripeSessionActivationDisposition(session) !== 'payable') {
     throw new CheckoutProtocolRequestError(
       'Checkout Session is no longer payable.',
       409,
@@ -504,11 +513,13 @@ async function compensateRecordedSession({
   workerLeaseId,
   idempotencyKey,
   failureCode,
+  authoritativeSession = null,
 }: {
   snapshot: PersistedCheckoutSnapshot;
   workerLeaseId: string;
   idempotencyKey: string;
   failureCode: string;
+  authoritativeSession?: Stripe.Checkout.Session | null;
 }) {
   if (!snapshot.stripe_checkout_session_id) {
     throw new Error('Recorded Checkout Session is required for compensation.');
@@ -520,21 +531,23 @@ async function compensateRecordedSession({
     p_failure_code: failureCode,
   });
 
-  let compensatedSession: Stripe.Checkout.Session | null = null;
+  let compensatedSession: Stripe.Checkout.Session | null = authoritativeSession;
 
-  try {
-    compensatedSession = await stripe.checkout.sessions.expire(
-      snapshot.stripe_checkout_session_id,
-      {},
-      { idempotencyKey }
-    );
-  } catch {
+  if (!compensatedSession || !isStripeSessionSafelyExpired(compensatedSession)) {
     try {
-      compensatedSession = await stripe.checkout.sessions.retrieve(
-        snapshot.stripe_checkout_session_id
+      compensatedSession = await stripe.checkout.sessions.expire(
+        snapshot.stripe_checkout_session_id,
+        {},
+        { idempotencyKey }
       );
     } catch {
-      // The durable reconciliation state below owns the unresolved external result.
+      try {
+        compensatedSession = await stripe.checkout.sessions.retrieve(
+          snapshot.stripe_checkout_session_id
+        );
+      } catch {
+        // The durable reconciliation state below owns the unresolved external result.
+      }
     }
   }
 
@@ -549,6 +562,70 @@ async function compensateRecordedSession({
   });
 
   return true;
+}
+
+async function requirePayableRecordedSession({
+  snapshot,
+  workerLeaseId,
+  keys,
+  session,
+  replacementHandoffCompleted = false,
+}: {
+  snapshot: PersistedCheckoutSnapshot;
+  workerLeaseId: string;
+  keys: ReturnType<typeof getStripeIdempotencyKeys>;
+  session: Stripe.Checkout.Session;
+  replacementHandoffCompleted?: boolean;
+}) {
+  const action = getStripeSessionActivationAction(session, replacementHandoffCompleted);
+
+  if (action === 'activate') return;
+
+  if (action === 'reconciliation_required') {
+    await markReconciliationRequired(
+      snapshot.id,
+      workerLeaseId,
+      replacementHandoffCompleted
+        ? 'new_session_nonpayable_after_handoff'
+        : 'new_session_state_indeterminate'
+    );
+
+    throw new CheckoutProtocolRequestError(
+      'Checkout requires reconciliation before it can continue.',
+      409,
+      'reconciliation_required'
+    );
+  }
+
+  const safelyTerminated = await compensateRecordedSession({
+    snapshot,
+    workerLeaseId,
+    idempotencyKey: keys.expireNew,
+    failureCode: 'new_session_expired_before_activation',
+    authoritativeSession: session,
+  });
+
+  if (!safelyTerminated) {
+    throw new CheckoutProtocolRequestError(
+      'Checkout requires reconciliation before it can continue.',
+      409,
+      'reconciliation_required'
+    );
+  }
+
+  if (snapshot.stripe_coupon_id) {
+    await deleteTemporaryCouponBestEffort(snapshot.stripe_coupon_id, 'expired_before_activation');
+  }
+
+  throw new CheckoutProtocolRequestError(
+    snapshot.replaces_checkout_intent_id
+      ? 'Checkout replacement Session is no longer payable.'
+      : 'Checkout Session expired before activation.',
+    409,
+    snapshot.replaces_checkout_intent_id
+      ? 'previous_checkout_usable'
+      : 'checkout_preparation_failed'
+  );
 }
 
 async function handleProtocolReplacement(
@@ -645,6 +722,14 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
         'Checkout request conflicts with its original command.',
         409,
         'checkout_request_conflict'
+      );
+    }
+
+    if (context.existing_orchestration_state === 'superseded') {
+      throw new CheckoutProtocolRequestError(
+        'Checkout request has been superseded.',
+        409,
+        'superseded'
       );
     }
 
@@ -779,7 +864,8 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     if (
       preparation.orchestration_state === 'failed' ||
-      preparation.orchestration_state === 'compensated'
+      preparation.orchestration_state === 'compensated' ||
+      preparation.orchestration_state === 'superseded'
     ) {
       throw new CheckoutProtocolRequestError(
         'Checkout request can no longer continue.',
@@ -817,7 +903,8 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     if (
       snapshot.orchestration_state === 'failed' ||
-      snapshot.orchestration_state === 'compensated'
+      snapshot.orchestration_state === 'compensated' ||
+      snapshot.orchestration_state === 'superseded'
     ) {
       throw new CheckoutProtocolRequestError(
         'Checkout request can no longer continue.',
@@ -886,7 +973,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
           idempotencyKey: keys.coupon,
         });
       } catch (error) {
-        return await handleAmbiguousStripeFailure(
+        return await handleStripeMutationFailure(
           error,
           snapshot.id,
           workerLeaseId,
@@ -935,11 +1022,12 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
           idempotencyKey: keys.session,
         });
       } catch (error) {
-        return await handleAmbiguousStripeFailure(
+        return await handleStripeMutationFailure(
           error,
           snapshot.id,
           workerLeaseId,
-          'session_creation'
+          'session_creation',
+          snapshot.stripe_coupon_id
         );
       }
 
@@ -997,8 +1085,23 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     let previousSnapshot: PersistedCheckoutSnapshot | null = null;
 
+    if (!snapshot.stripe_checkout_session_id) {
+      throw new Error('Recorded checkout is missing its Stripe Session before activation.');
+    }
+
+    session = await stripe.checkout.sessions.retrieve(snapshot.stripe_checkout_session_id);
+    await requirePayableRecordedSession({ snapshot, workerLeaseId, keys, session });
+
     if (snapshot.replaces_checkout_intent_id) {
       previousSnapshot = await handleProtocolReplacement(snapshot, workerLeaseId, keys);
+      session = await stripe.checkout.sessions.retrieve(snapshot.stripe_checkout_session_id);
+      await requirePayableRecordedSession({
+        snapshot,
+        workerLeaseId,
+        keys,
+        session,
+        replacementHandoffCompleted: true,
+      });
     }
 
     const activationCapability = createConfirmationCapability();
