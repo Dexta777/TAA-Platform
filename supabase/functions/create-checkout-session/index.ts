@@ -29,6 +29,27 @@ import {
   provePreviousCheckoutIntentExpired,
   validateReplacementAccess,
 } from '../_shared/checkout-replacement.ts';
+import {
+  buildCheckoutResponse,
+  buildStripeCouponParametersV1,
+  buildStripeSessionParametersV1,
+  CHECKOUT_WORKER_LEASE_RETRY_SECONDS,
+  classifyStripeFailure,
+  fingerprintCheckoutCommand,
+  getStripeIdempotencyKeys,
+  getStripeSessionResumeMode,
+  isCheckoutReservationsEnabled,
+  isStripeSessionSafelyExpired,
+  isStripeSessionUsable,
+  normalizeCheckoutCommand,
+  normalizeUuid,
+  sha256Deterministic,
+  type PersistedCheckoutSnapshot,
+} from '../_shared/checkout-protocol.ts';
+import {
+  callCheckoutRpc,
+  loadPersistedCheckoutSnapshot,
+} from '../_shared/checkout-orchestration.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 const CHECKOUT_RETURN_URL =
@@ -88,6 +109,18 @@ class CheckoutReplacementRequestError extends Error {
     );
     this.name = 'CheckoutReplacementRequestError';
     this.status = status;
+  }
+}
+
+class CheckoutProtocolRequestError extends Error {
+  status: number;
+  code: string;
+
+  constructor(message: string, status: number, code: string) {
+    super(message);
+    this.name = 'CheckoutProtocolRequestError';
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -319,6 +352,722 @@ async function compensateNewCheckoutBestEffort({
   return checkoutInvalidated;
 }
 
+type CheckoutRequestContext = {
+  attempt_status: string;
+  hard_expires_at: string;
+  active_checkout_intent_id: string | null;
+  in_flight_checkout_intent_id: string | null;
+  replacement_checkout_intent_id: string | null;
+  existing_checkout_intent_id: string | null;
+  existing_command_fingerprint: string | null;
+  existing_orchestration_state: string | null;
+};
+
+type PreparedCheckoutRequest = {
+  checkout_intent_id: string;
+  reservation_id: string;
+  orchestration_state: string;
+  request_replayed: boolean;
+  worker_lease_acquired: boolean;
+  worker_lease_expires_at: string;
+};
+
+function getRequiredAttemptToken(payload: Record<string, unknown>) {
+  const token = String(payload.checkout_attempt_token ?? '').trim();
+
+  if (token.length < 32 || token.length > 255) {
+    throw new CheckoutInputError('Checkout attempt token is invalid.');
+  }
+
+  return token;
+}
+
+function isSessionReadyForClient(session: Stripe.Checkout.Session) {
+  return session.status === 'open' && session.payment_status === 'unpaid';
+}
+
+async function markReconciliationRequired(
+  checkoutIntentId: string,
+  workerLeaseId: string,
+  failureCode: string
+) {
+  await callCheckoutRpc(supabase, 'mark_checkout_reconciliation_required', {
+    p_checkout_intent_id: checkoutIntentId,
+    p_worker_lease_id: workerLeaseId,
+    p_failure_code: failureCode,
+  });
+}
+
+async function failDefinitiveCheckoutRequest(
+  checkoutIntentId: string,
+  workerLeaseId: string,
+  failureCode: string
+) {
+  await callCheckoutRpc(supabase, 'fail_checkout_request', {
+    p_checkout_intent_id: checkoutIntentId,
+    p_worker_lease_id: workerLeaseId,
+    p_failure_code: failureCode,
+  });
+}
+
+async function handleAmbiguousStripeFailure(
+  error: unknown,
+  checkoutIntentId: string,
+  workerLeaseId: string,
+  operation: string
+): Promise<never> {
+  const failureKind = classifyStripeFailure(error);
+
+  if (failureKind === 'transport_ambiguous') {
+    throw new CheckoutProtocolRequestError(
+      'Checkout preparation is still processing. Please retry.',
+      503,
+      'stripe_result_ambiguous'
+    );
+  }
+
+  if (failureKind === 'server_indeterminate') {
+    await markReconciliationRequired(checkoutIntentId, workerLeaseId, `${operation}_indeterminate`);
+
+    throw new CheckoutProtocolRequestError(
+      'Checkout requires reconciliation before it can continue.',
+      409,
+      'reconciliation_required'
+    );
+  }
+
+  await failDefinitiveCheckoutRequest(checkoutIntentId, workerLeaseId, `${operation}_failed`);
+
+  throw new CheckoutProtocolRequestError(
+    'Unable to prepare Checkout.',
+    500,
+    'checkout_preparation_failed'
+  );
+}
+
+async function getProtocolCheckoutResponse(
+  snapshot: PersistedCheckoutSnapshot,
+  workerLeaseId: string,
+  session: Stripe.Checkout.Session,
+  activationCapability?: {
+    token: string;
+    generation: number;
+  }
+) {
+  if (!isSessionReadyForClient(session) || !session.client_secret) {
+    throw new CheckoutProtocolRequestError(
+      'Checkout Session is no longer payable.',
+      409,
+      'checkout_unavailable'
+    );
+  }
+
+  let confirmationToken = activationCapability?.token || '';
+  let confirmationGeneration = activationCapability?.generation || 0;
+
+  if (!activationCapability) {
+    const capability = createConfirmationCapability();
+    const capabilityHash = await sha256Hex(capability.tokenBytes);
+    const capabilityExpiresAt = new Date(Date.now() + CONFIRMATION_CAPABILITY_TTL_MS).toISOString();
+    const generation = await callCheckoutRpc<number>(
+      supabase,
+      'rotate_checkout_confirmation_capability',
+      {
+        p_checkout_intent_id: snapshot.id,
+        p_worker_lease_id: workerLeaseId,
+        p_confirmation_token_hash: capabilityHash,
+        p_confirmation_token_expires_at: capabilityExpiresAt,
+      }
+    );
+
+    if (!Number.isInteger(generation)) {
+      throw new Error('Checkout confirmation generation was not returned.');
+    }
+
+    confirmationToken = capability.token;
+    confirmationGeneration = Number(generation);
+  }
+
+  return jsonResponse(
+    buildCheckoutResponse(
+      snapshot,
+      session,
+      confirmationToken,
+      confirmationGeneration,
+      snapshot.stripe_customer_id ? snapshot.customer_email : null
+    )
+  );
+}
+
+async function compensateRecordedSession({
+  snapshot,
+  workerLeaseId,
+  idempotencyKey,
+  failureCode,
+}: {
+  snapshot: PersistedCheckoutSnapshot;
+  workerLeaseId: string;
+  idempotencyKey: string;
+  failureCode: string;
+}) {
+  if (!snapshot.stripe_checkout_session_id) {
+    throw new Error('Recorded Checkout Session is required for compensation.');
+  }
+
+  await callCheckoutRpc(supabase, 'begin_checkout_compensation', {
+    p_checkout_intent_id: snapshot.id,
+    p_worker_lease_id: workerLeaseId,
+    p_failure_code: failureCode,
+  });
+
+  let compensatedSession: Stripe.Checkout.Session | null = null;
+
+  try {
+    compensatedSession = await stripe.checkout.sessions.expire(
+      snapshot.stripe_checkout_session_id,
+      {},
+      { idempotencyKey }
+    );
+  } catch {
+    try {
+      compensatedSession = await stripe.checkout.sessions.retrieve(
+        snapshot.stripe_checkout_session_id
+      );
+    } catch {
+      // The durable reconciliation state below owns the unresolved external result.
+    }
+  }
+
+  if (!compensatedSession || !isStripeSessionSafelyExpired(compensatedSession)) {
+    await markReconciliationRequired(snapshot.id, workerLeaseId, 'compensation_ambiguous');
+    return false;
+  }
+
+  await callCheckoutRpc(supabase, 'complete_checkout_compensation', {
+    p_checkout_intent_id: snapshot.id,
+    p_worker_lease_id: workerLeaseId,
+  });
+
+  return true;
+}
+
+async function handleProtocolReplacement(
+  snapshot: PersistedCheckoutSnapshot,
+  workerLeaseId: string,
+  keys: ReturnType<typeof getStripeIdempotencyKeys>
+) {
+  if (!snapshot.replaces_checkout_intent_id || !snapshot.stripe_checkout_session_id) {
+    throw new Error('Persisted checkout replacement snapshot is incomplete.');
+  }
+
+  await callCheckoutRpc(supabase, 'begin_checkout_replacement', {
+    p_checkout_intent_id: snapshot.id,
+    p_worker_lease_id: workerLeaseId,
+  });
+
+  const previousSnapshot = await loadPersistedCheckoutSnapshot(
+    supabase,
+    snapshot.replaces_checkout_intent_id
+  );
+
+  if (!previousSnapshot.stripe_checkout_session_id) {
+    throw new Error('Previous Checkout Session snapshot is incomplete.');
+  }
+
+  let previousSession: Stripe.Checkout.Session | null = null;
+
+  try {
+    previousSession = await stripe.checkout.sessions.expire(
+      previousSnapshot.stripe_checkout_session_id,
+      {},
+      { idempotencyKey: keys.expirePrevious }
+    );
+  } catch {
+    try {
+      previousSession = await stripe.checkout.sessions.retrieve(
+        previousSnapshot.stripe_checkout_session_id
+      );
+    } catch {
+      // Compensation below prevents B from becoming another payable branch.
+    }
+  }
+
+  if (!previousSession || !isStripeSessionSafelyExpired(previousSession)) {
+    const newSessionInvalidated = await compensateRecordedSession({
+      snapshot,
+      workerLeaseId,
+      idempotencyKey: keys.expireNew,
+      failureCode: 'previous_checkout_not_expired',
+    });
+
+    throw new CheckoutProtocolRequestError(
+      'Checkout could not be replaced safely.',
+      409,
+      newSessionInvalidated && previousSession && isStripeSessionUsable(previousSession)
+        ? 'previous_checkout_usable'
+        : 'reconciliation_required'
+    );
+  }
+
+  return previousSnapshot;
+}
+
+async function handleReservationCheckout(request: Request, payload: Record<string, unknown>) {
+  try {
+    const authenticatedUser = await getAuthenticatedUser(supabase, request);
+    const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
+    const checkoutRequestId = normalizeUuid(payload.checkout_request_id, 'Checkout request ID');
+    const attemptToken = getRequiredAttemptToken(payload);
+    const attemptCapabilityHash = await sha256Hex(attemptToken);
+    const replaceCheckoutSessionId = cleanText(payload.replace_checkout_session_id, 255) || null;
+    const context = await callCheckoutRpc<CheckoutRequestContext>(
+      supabase,
+      'resolve_checkout_request_context',
+      {
+        p_checkout_attempt_id: checkoutAttemptId,
+        p_checkout_request_id: checkoutRequestId,
+        p_user_id: authenticatedUser?.id || null,
+        p_capability_hash: attemptCapabilityHash,
+        p_replace_checkout_session_id: replaceCheckoutSessionId,
+      }
+    );
+
+    if (!context) throw new Error('Checkout request context was not returned.');
+
+    const command = normalizeCheckoutCommand(payload, context.replacement_checkout_intent_id);
+    const commandFingerprint = await fingerprintCheckoutCommand(command);
+
+    if (
+      context.existing_checkout_intent_id &&
+      context.existing_command_fingerprint !== commandFingerprint
+    ) {
+      throw new CheckoutProtocolRequestError(
+        'Checkout request conflicts with its original command.',
+        409,
+        'checkout_request_conflict'
+      );
+    }
+
+    if (
+      context.existing_checkout_intent_id &&
+      !['active', 'payment_pending'].includes(context.attempt_status)
+    ) {
+      throw new CheckoutProtocolRequestError(
+        'Checkout attempt can no longer return a payable Session.',
+        409,
+        'checkout_attempt_terminal'
+      );
+    }
+
+    let canonicalSnapshot: Record<string, unknown> | null = null;
+    let canonicalItems: Array<Record<string, unknown>> | null = null;
+    let canonicalShippingOptions: Array<Record<string, unknown>> | null = null;
+
+    if (!context.existing_checkout_intent_id) {
+      if (!command.shipping_method_name) {
+        throw new CheckoutInputError('Please select a shipping method.');
+      }
+
+      const validatedItems = await resolveCanonicalCart(supabase, command.cart);
+      const subtotalAmount = validatedItems.reduce((total, item) => total + item.line_total, 0);
+      const totalWeightGrams = validatedItems.reduce((total, item) => total + item.weight_grams, 0);
+
+      if (totalWeightGrams <= 0) {
+        throw new CheckoutInputError('Basket weight could not be calculated.');
+      }
+
+      const shippingOptions = await getCanonicalShippingOptions(supabase, totalWeightGrams);
+      const selectedShippingOption = shippingOptions.find(
+        (option) => option.name.trim().toLowerCase() === command.shipping_method_name
+      );
+
+      if (!selectedShippingOption) {
+        throw new CheckoutInputError('Selected shipping method is unavailable.');
+      }
+
+      const orderedShippingOptions = [
+        selectedShippingOption,
+        ...shippingOptions.filter((option) => option.id !== selectedShippingOption.id),
+      ];
+      const stripeCustomer = await getStripeCustomer(authenticatedUser?.id);
+      const trustedIdentityEmail = cleanText(authenticatedUser?.email, 320) || null;
+      const discountEvaluation = command.discount_code
+        ? await evaluateSubmittedDiscount({
+            code: command.discount_code,
+            subtotalAmount,
+            shippingAmount: selectedShippingOption.shipping,
+            userId: authenticatedUser?.id || null,
+            trustedEmail: trustedIdentityEmail,
+            phone: command.shipping_phone,
+            shippingAddress: command.shipping_address,
+          })
+        : null;
+      const shippingAmount = discountEvaluation
+        ? discountEvaluation.final_shipping_amount
+        : selectedShippingOption.shipping;
+      const totalAmount = discountEvaluation
+        ? discountEvaluation.total_amount
+        : subtotalAmount + shippingAmount;
+
+      canonicalSnapshot = {
+        customer_email: stripeCustomer.email,
+        subtotal_amount: subtotalAmount,
+        shipping_amount: shippingAmount,
+        total_amount: totalAmount,
+        currency: 'gbp',
+        shipping_method_name: selectedShippingOption.name,
+        shipping_method_id: selectedShippingOption.id,
+        shipping_rate_id: selectedShippingOption.rate_id,
+        total_weight_grams: totalWeightGrams,
+        shipping_name: command.shipping_name,
+        shipping_phone: command.shipping_phone,
+        shipping_address: command.shipping_address,
+        billing_name: command.billing_name,
+        billing_address: command.billing_address,
+        billing_is_different: command.billing_is_different,
+        stripe_customer_id: stripeCustomer.id,
+        create_account_requested: command.create_account_requested,
+        discount_code_id: discountEvaluation?.discount_code_id || null,
+        discount_code: discountEvaluation?.code || null,
+        discount_amount: discountEvaluation?.discount_amount || 0,
+        shipping_discount_amount: discountEvaluation?.shipping_discount_amount || 0,
+        discount_name: discountEvaluation?.name || null,
+        discount_type: discountEvaluation?.discount_type || null,
+        stripe_return_url: CHECKOUT_RETURN_URL,
+      };
+      canonicalItems = validatedItems;
+      canonicalShippingOptions = orderedShippingOptions.map((option) => ({
+        shipping_method_id: option.id,
+        shipping_rate_id: option.rate_id,
+        display_name: option.name,
+        description: option.description,
+        carrier: option.carrier,
+        amount: getStripeShippingAmount(option.shipping, discountEvaluation?.discount_type || null),
+        original_amount: option.shipping,
+        currency: option.currency,
+      }));
+    }
+
+    const workerLeaseId = crypto.randomUUID();
+    const preparation = await callCheckoutRpc<PreparedCheckoutRequest>(
+      supabase,
+      'prepare_checkout_request',
+      {
+        p_checkout_attempt_id: checkoutAttemptId,
+        p_checkout_request_id: checkoutRequestId,
+        p_user_id: authenticatedUser?.id || null,
+        p_capability_hash: attemptCapabilityHash,
+        p_command_fingerprint: commandFingerprint,
+        p_replaces_checkout_intent_id: command.replaces_checkout_intent_id,
+        p_worker_lease_id: workerLeaseId,
+        p_reservation_expires_at: new Date(Date.now() + 29 * 60 * 1000).toISOString(),
+        p_snapshot: canonicalSnapshot,
+        p_items: canonicalItems,
+        p_shipping_options: canonicalShippingOptions,
+      }
+    );
+
+    if (!preparation) throw new Error('Prepared checkout request was not returned.');
+
+    if (preparation.orchestration_state === 'reconciliation_required') {
+      throw new CheckoutProtocolRequestError(
+        'Checkout requires reconciliation before it can continue.',
+        409,
+        'reconciliation_required'
+      );
+    }
+
+    if (
+      preparation.orchestration_state === 'failed' ||
+      preparation.orchestration_state === 'compensated'
+    ) {
+      throw new CheckoutProtocolRequestError(
+        'Checkout request can no longer continue.',
+        409,
+        preparation.orchestration_state
+      );
+    }
+
+    if (!preparation.worker_lease_acquired) {
+      return new Response(
+        JSON.stringify({
+          error: 'Checkout preparation is still processing.',
+          checkout_orchestration_error: 'operation_in_progress',
+        }),
+        {
+          status: 202,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Retry-After': String(CHECKOUT_WORKER_LEASE_RETRY_SECONDS),
+          },
+        }
+      );
+    }
+
+    let snapshot = await loadPersistedCheckoutSnapshot(supabase, preparation.checkout_intent_id);
+
+    if (snapshot.orchestration_state === 'reconciliation_required') {
+      throw new CheckoutProtocolRequestError(
+        'Checkout requires reconciliation before it can continue.',
+        409,
+        'reconciliation_required'
+      );
+    }
+
+    if (
+      snapshot.orchestration_state === 'failed' ||
+      snapshot.orchestration_state === 'compensated'
+    ) {
+      throw new CheckoutProtocolRequestError(
+        'Checkout request can no longer continue.',
+        409,
+        snapshot.orchestration_state
+      );
+    }
+
+    if (snapshot.orchestration_state === 'compensating') {
+      const compensationKeys = getStripeIdempotencyKeys(
+        snapshot.checkout_attempt_id,
+        snapshot.checkout_request_id
+      );
+      const safelyCompensated = await compensateRecordedSession({
+        snapshot,
+        workerLeaseId,
+        idempotencyKey: compensationKeys.expireNew,
+        failureCode: 'resumed_compensation',
+      });
+
+      throw new CheckoutProtocolRequestError(
+        'Checkout could not be replaced safely.',
+        409,
+        safelyCompensated ? 'previous_checkout_usable' : 'reconciliation_required'
+      );
+    }
+
+    if (getStripeSessionResumeMode(snapshot) === 'retrieve_active') {
+      if (!snapshot.stripe_checkout_session_id) {
+        throw new Error('Active checkout is missing its Stripe Session.');
+      }
+
+      const activeSession = await stripe.checkout.sessions.retrieve(
+        snapshot.stripe_checkout_session_id
+      );
+
+      return await getProtocolCheckoutResponse(snapshot, workerLeaseId, activeSession);
+    }
+
+    const keys = getStripeIdempotencyKeys(checkoutAttemptId, checkoutRequestId);
+    const couponParameters = buildStripeCouponParametersV1(snapshot);
+
+    if (couponParameters && !snapshot.stripe_coupon_id) {
+      const couponParamsHash = await sha256Deterministic(couponParameters);
+      const couponStart = await callCheckoutRpc<{
+        params_match: boolean;
+        orchestration_state: string;
+      }>(supabase, 'begin_checkout_coupon_creation', {
+        p_checkout_intent_id: snapshot.id,
+        p_worker_lease_id: workerLeaseId,
+        p_params_hash: couponParamsHash,
+      });
+
+      if (!couponStart?.params_match) {
+        throw new CheckoutProtocolRequestError(
+          'Checkout requires reconciliation before it can continue.',
+          409,
+          'reconciliation_required'
+        );
+      }
+
+      let coupon: Stripe.Coupon;
+
+      try {
+        coupon = await stripe.coupons.create(couponParameters, {
+          idempotencyKey: keys.coupon,
+        });
+      } catch (error) {
+        return await handleAmbiguousStripeFailure(
+          error,
+          snapshot.id,
+          workerLeaseId,
+          'coupon_creation'
+        );
+      }
+
+      await callCheckoutRpc(supabase, 'record_checkout_coupon', {
+        p_checkout_intent_id: snapshot.id,
+        p_worker_lease_id: workerLeaseId,
+        p_stripe_coupon_id: coupon.id,
+      });
+      snapshot = await loadPersistedCheckoutSnapshot(supabase, snapshot.id);
+    }
+
+    let session: Stripe.Checkout.Session;
+
+    if (getStripeSessionResumeMode(snapshot) === 'retrieve_recorded') {
+      if (!snapshot.stripe_checkout_session_id) {
+        throw new Error('Recorded checkout is missing its Stripe Session.');
+      }
+
+      session = await stripe.checkout.sessions.retrieve(snapshot.stripe_checkout_session_id);
+    } else {
+      const sessionParameters = buildStripeSessionParametersV1(snapshot);
+      const sessionParamsHash = await sha256Deterministic(sessionParameters);
+      const sessionStart = await callCheckoutRpc<{
+        params_match: boolean;
+        orchestration_state: string;
+      }>(supabase, 'begin_checkout_session_creation', {
+        p_checkout_intent_id: snapshot.id,
+        p_worker_lease_id: workerLeaseId,
+        p_params_hash: sessionParamsHash,
+      });
+
+      if (!sessionStart?.params_match) {
+        throw new CheckoutProtocolRequestError(
+          'Checkout requires reconciliation before it can continue.',
+          409,
+          'reconciliation_required'
+        );
+      }
+
+      try {
+        session = await stripe.checkout.sessions.create(sessionParameters, {
+          idempotencyKey: keys.session,
+        });
+      } catch (error) {
+        return await handleAmbiguousStripeFailure(
+          error,
+          snapshot.id,
+          workerLeaseId,
+          'session_creation'
+        );
+      }
+
+      const stripeShippingRateIds = session.shipping_options.map((option, position) => ({
+        position,
+        stripe_shipping_rate_id:
+          typeof option.shipping_rate === 'string' ? option.shipping_rate : option.shipping_rate.id,
+      }));
+
+      await callCheckoutRpc(supabase, 'record_checkout_session', {
+        p_checkout_intent_id: snapshot.id,
+        p_worker_lease_id: workerLeaseId,
+        p_stripe_checkout_session_id: session.id,
+        p_stripe_session_expires_at: new Date(session.expires_at * 1000).toISOString(),
+        p_shipping_rate_ids: stripeShippingRateIds,
+      });
+      snapshot = await loadPersistedCheckoutSnapshot(supabase, snapshot.id);
+    }
+
+    try {
+      verifyCreatedDiscountEconomics(
+        {
+          amountSubtotal: session.amount_subtotal,
+          amountDiscount: session.total_details?.amount_discount ?? null,
+          shippingAmount:
+            session.shipping_cost?.amount_total ?? session.total_details?.amount_shipping ?? null,
+          amountTotal: session.amount_total,
+          currency: session.currency,
+        },
+        {
+          subtotalAmount: snapshot.subtotal_amount,
+          discountAmount: snapshot.discount_amount,
+          shippingAmount: snapshot.shipping_amount,
+          totalAmount: snapshot.total_amount,
+        }
+      );
+    } catch (error) {
+      console.error('STRIPE CHECKOUT ECONOMICS MISMATCH:', {
+        checkout_intent_id: snapshot.id,
+        ...(error instanceof CheckoutEconomicsMismatchError ? error.details : {}),
+      });
+      const safelyCompensated = await compensateRecordedSession({
+        snapshot,
+        workerLeaseId,
+        idempotencyKey: keys.expireNew,
+        failureCode: 'stripe_economics_mismatch',
+      });
+
+      throw new CheckoutProtocolRequestError(
+        'Unable to prepare Checkout.',
+        safelyCompensated ? 500 : 409,
+        safelyCompensated ? 'checkout_preparation_failed' : 'reconciliation_required'
+      );
+    }
+
+    let previousSnapshot: PersistedCheckoutSnapshot | null = null;
+
+    if (snapshot.replaces_checkout_intent_id) {
+      previousSnapshot = await handleProtocolReplacement(snapshot, workerLeaseId, keys);
+    }
+
+    const activationCapability = createConfirmationCapability();
+    const activationCapabilityHash = await sha256Hex(activationCapability.tokenBytes);
+    const activationCapabilityExpiresAt = new Date(
+      Date.now() + CONFIRMATION_CAPABILITY_TTL_MS
+    ).toISOString();
+    const confirmationGeneration = await callCheckoutRpc<number>(
+      supabase,
+      'activate_checkout_request',
+      {
+        p_checkout_intent_id: snapshot.id,
+        p_worker_lease_id: workerLeaseId,
+        p_confirmation_token_hash: activationCapabilityHash,
+        p_confirmation_token_expires_at: activationCapabilityExpiresAt,
+      }
+    );
+
+    if (!Number.isInteger(confirmationGeneration)) {
+      throw new Error('Checkout activation did not return a confirmation generation.');
+    }
+
+    if (previousSnapshot?.stripe_coupon_id) {
+      await deleteTemporaryCouponBestEffort(
+        previousSnapshot.stripe_coupon_id,
+        'protocol_checkout_replacement'
+      );
+    }
+
+    snapshot = await loadPersistedCheckoutSnapshot(supabase, snapshot.id);
+
+    return await getProtocolCheckoutResponse(snapshot, workerLeaseId, session, {
+      token: activationCapability.token,
+      generation: Number(confirmationGeneration),
+    });
+  } catch (error) {
+    if (error instanceof CheckoutInputError) {
+      return jsonResponse({ error: error.message }, 400);
+    }
+
+    if (error instanceof DiscountEligibilityError) {
+      return jsonResponse(
+        {
+          error: error.message,
+          discount_error: error.publicReason,
+          ...(error.minimumSubtotalAmount !== null
+            ? { minimum_subtotal_amount: error.minimumSubtotalAmount }
+            : {}),
+        },
+        400
+      );
+    }
+
+    if (error instanceof CheckoutProtocolRequestError) {
+      return jsonResponse(
+        { error: error.message, checkout_orchestration_error: error.code },
+        error.status
+      );
+    }
+
+    console.error('CREATE RESERVATION CHECKOUT ERROR:', {
+      error_name: error instanceof Error ? error.name : 'unknown',
+      error_message: error instanceof Error ? error.message : 'unknown',
+    });
+
+    return jsonResponse({ error: 'Unable to prepare Checkout.' }, 500);
+  }
+}
+
 serve(async (request) => {
   if (request.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -344,6 +1093,10 @@ serve(async (request) => {
 
     if (!payload || typeof payload !== 'object') {
       throw new CheckoutInputError('Invalid request body.');
+    }
+
+    if (isCheckoutReservationsEnabled(Deno.env.get('CHECKOUT_RESERVATIONS_ENABLED'))) {
+      return await handleReservationCheckout(request, payload as Record<string, unknown>);
     }
 
     const cart = Array.isArray(payload.cart) ? payload.cart : [];
