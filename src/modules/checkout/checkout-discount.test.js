@@ -6,12 +6,43 @@ import {
   normalizeDiscountCode,
   toSingleAppliedDiscount,
 } from './checkout-discount.js';
-import { getCheckoutDiscountDisplay } from './checkout-summary.js';
+import { createCheckoutSummary, getCheckoutDiscountDisplay } from './checkout-summary.js';
+
+class FakeClassList {
+  constructor(classes = []) {
+    this.classes = new Set(classes);
+  }
+
+  add(...classes) {
+    classes.forEach((className) => this.classes.add(className));
+  }
+
+  contains(className) {
+    return this.classes.has(className);
+  }
+
+  remove(...classes) {
+    classes.forEach((className) => this.classes.delete(className));
+  }
+
+  toggle(className, force) {
+    const shouldAdd = force === undefined ? !this.contains(className) : Boolean(force);
+
+    if (shouldAdd) {
+      this.add(className);
+    } else {
+      this.remove(className);
+    }
+
+    return shouldAdd;
+  }
+}
 
 class FakeElement {
   constructor(attributes = {}) {
     this.attributes = new Map(Object.entries(attributes));
     this.children = [];
+    this.classList = new FakeClassList();
     this.disabled = false;
     this.hidden = false;
     this.listeners = new Map();
@@ -35,6 +66,7 @@ class FakeElement {
 
   cloneNode(deep = false) {
     const clone = new FakeElement(Object.fromEntries(this.attributes));
+    clone.classList = new FakeClassList(this.classList.classes);
     clone.disabled = this.disabled;
     clone.hidden = this.hidden;
     clone.style = { ...this.style };
@@ -55,9 +87,13 @@ class FakeElement {
   }
 
   matches(selector) {
-    const match = selector.match(/^\[([^=]+)="([^"]+)"\]$/);
+    const valueMatch = selector.match(/^\[([^=]+)="([^"]+)"\]$/);
 
-    return Boolean(match && this.attributes.get(match[1]) === match[2]);
+    if (valueMatch) return this.attributes.get(valueMatch[1]) === valueMatch[2];
+
+    const presenceMatch = selector.match(/^\[([^=]+)\]$/);
+
+    return Boolean(presenceMatch && this.attributes.has(presenceMatch[1]));
   }
 
   querySelector(selector) {
@@ -116,6 +152,16 @@ function createDiscountFixture({ includeSuccess = false, partial = false } = {})
 
 function getGeneratedRows(wrapper) {
   return wrapper.querySelectorAll('[data-applied-discount-generated="true"]');
+}
+
+function createSummaryFixture() {
+  const root = new FakeElement();
+  const discountRow = root.appendChild(new FakeElement({ 'data-checkout-discount-row': 'true' }));
+  const discountAmount = discountRow.appendChild(
+    new FakeElement({ 'data-checkout-discount': 'true' })
+  );
+
+  return { discountAmount, discountRow, root };
 }
 
 test('discount input normalization trims and uppercases customer input', () => {
@@ -225,7 +271,9 @@ test('successful application clears input and renders one generated row from the
   assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'SAVE10');
   assert.equal(fixture.template.attributes.get('data-applied-discount-template'), 'true');
   assert.equal(fixture.template.hidden, true);
-  assert.equal(fixture.error.style.display, 'none');
+  assert.equal(fixture.template.classList.contains('is-visible'), false);
+  assert.equal(rows[0].classList.contains('is-visible'), true);
+  assert.equal(fixture.error.classList.contains('is-visible'), false);
 });
 
 test('successful replacement renders only the replacement code', async () => {
@@ -242,6 +290,7 @@ test('successful replacement renders only the replacement code', async () => {
 
   const rows = getGeneratedRows(fixture.wrapper);
   assert.equal(rows.length, 1);
+  assert.equal(rows[0].classList.contains('is-visible'), true);
   assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'SECOND');
   assert.deepEqual(controller.getAppliedDiscount(), { code: 'SECOND' });
 });
@@ -268,6 +317,11 @@ test('failed replacement preserves the applied row and entered code', async () =
     assert.equal(rows[0].querySelector('[data-applied-discount-code="true"]').textContent, 'FIRST');
     assert.equal(fixture.input.value, 'BADCODE');
     assert.equal(fixture.error.textContent, 'This discount code is not valid.');
+    assert.equal(fixture.error.classList.contains('is-visible'), true);
+
+    controller.setAppliedDiscount({ code: 'FIRST' });
+    assert.equal(fixture.error.textContent, '');
+    assert.equal(fixture.error.classList.contains('is-visible'), false);
   } finally {
     console.error = originalConsoleError;
   }
@@ -290,6 +344,7 @@ test('generated remove control clears the applied row after successful removal',
   assert.equal(removeCalls, 1);
   assert.equal(getGeneratedRows(fixture.wrapper).length, 0);
   assert.equal(fixture.template.attributes.get('data-applied-discount-template'), 'true');
+  assert.equal(fixture.template.classList.contains('is-visible'), false);
   assert.equal(controller.getAppliedDiscount(), null);
 });
 
@@ -305,13 +360,15 @@ test('optional success element still displays apply and removal messages', async
   await fixture.apply.dispatch('click');
 
   assert.equal(fixture.success.textContent, 'SAVE10 has been applied.');
-  assert.equal(fixture.error.style.display, 'none');
+  assert.equal(fixture.success.classList.contains('is-visible'), true);
+  assert.equal(fixture.error.classList.contains('is-visible'), false);
 
   const generatedRow = getGeneratedRows(fixture.wrapper)[0];
   await generatedRow.querySelector('[data-applied-discount-remove="true"]').dispatch('click');
 
   assert.equal(fixture.success.textContent, 'Discount code removed.');
-  assert.equal(fixture.error.style.display, 'none');
+  assert.equal(fixture.success.classList.contains('is-visible'), true);
+  assert.equal(fixture.error.classList.contains('is-visible'), false);
 });
 
 test('busy state disables input, apply, and generated remove without hiding its row', () => {
@@ -328,7 +385,29 @@ test('busy state disables input, apply, and generated remove without hiding its 
   assert.equal(fixture.input.disabled, true);
   assert.equal(fixture.apply.disabled, true);
   assert.equal(remove.disabled, true);
-  assert.equal(generatedRow.style.display, '');
+  assert.equal(generatedRow.classList.contains('is-visible'), true);
+});
+
+test('summary row toggles semantic visibility for active and absent discounts', () => {
+  const fixture = createSummaryFixture();
+  const summary = createCheckoutSummary(fixture.root);
+
+  assert.equal(fixture.discountRow.classList.contains('is-visible'), false);
+
+  summary.renderDiscount({
+    code: 'SAVE10',
+    type: 'percentage',
+    discount_amount: 190,
+    shipping_discount_amount: 0,
+  });
+
+  assert.equal(fixture.discountRow.classList.contains('is-visible'), true);
+  assert.equal(fixture.discountAmount.textContent, '-£1.90');
+
+  summary.renderDiscount(null);
+
+  assert.equal(fixture.discountRow.classList.contains('is-visible'), false);
+  assert.equal(fixture.discountAmount.textContent, '');
 });
 
 test('partial or absent discount markup is unavailable without breaking initialization', () => {
