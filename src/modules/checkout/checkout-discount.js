@@ -32,66 +32,166 @@ export function getDiscountErrorMessage(error) {
   return DISCOUNT_MESSAGES[error?.discountError] || 'Discount code could not be applied.';
 }
 
+export function toSingleAppliedDiscount(discount) {
+  return discount && typeof discount === 'object' && !Array.isArray(discount)
+    ? [{ ...discount }]
+    : [];
+}
+
 export function createCheckoutDiscount(root, { onApply, onRemove }) {
-  const input = root.querySelector('[data-discount-code]');
-  const applyControl = root.querySelector('[data-discount-apply]');
-  const removeControl = root.querySelector('[data-discount-remove]');
-  const messageElement = root.querySelector('[data-discount-message]');
-  const hasAnyDiscountUi = Boolean(input || applyControl || removeControl || messageElement);
-  const ready = Boolean(input && applyControl && messageElement);
+  const input = root.querySelector('[data-discount-code="true"]');
+  const applyControl = root.querySelector('[data-discount-apply="true"]');
+  const appliedDiscountsWrapper = root.querySelector('[data-applied-discounts="true"]');
+  const discoveredAppliedDiscountTemplate = root.querySelector(
+    '[data-applied-discount-template="true"]'
+  );
+  const appliedDiscountTemplate = appliedDiscountsWrapper?.querySelector(
+    '[data-applied-discount-template="true"]'
+  );
+  const successElement = root.querySelector('[data-discount-success="true"]');
+  const errorElement = root.querySelector('[data-discount-error="true"]');
+  const requiredElements = [
+    input,
+    applyControl,
+    appliedDiscountsWrapper,
+    appliedDiscountTemplate,
+    successElement,
+    errorElement,
+  ];
+  const hasAnyDiscountUi = Boolean(
+    requiredElements.some(Boolean) || discoveredAppliedDiscountTemplate
+  );
+  const ready = requiredElements.every(Boolean);
   let requestedCode = '';
-  let appliedDiscount = null;
+  let appliedDiscounts = [];
   let busy = false;
 
   if (hasAnyDiscountUi && !ready) {
     console.error(
-      'Discount UI requires [data-discount-code], [data-discount-apply], and [data-discount-message].'
+      'Discount UI requires [data-discount-code="true"], [data-discount-apply="true"], [data-applied-discounts="true"], [data-applied-discount-template="true"], [data-discount-success="true"], and [data-discount-error="true"].'
     );
   }
 
-  function showMessage(message, type = 'status') {
-    if (!messageElement) return;
+  function hideMessage(element) {
+    if (!element) return;
 
-    messageElement.textContent = message;
-    messageElement.dataset.discountMessageType = type;
-    messageElement.style.display = message ? '' : 'none';
+    element.textContent = '';
+    element.style.display = 'none';
+  }
+
+  function clearMessages() {
+    if (!ready) return;
+
+    hideMessage(successElement);
+    hideMessage(errorElement);
+  }
+
+  function showSuccess(message) {
+    if (!ready) return;
+
+    hideMessage(errorElement);
+
+    successElement.textContent = message;
+    successElement.style.display = message ? '' : 'none';
+  }
+
+  function showErrorMessage(message) {
+    if (!ready) return;
+
+    hideMessage(successElement);
+
+    errorElement.textContent = message;
+    errorElement.style.display = message ? '' : 'none';
+  }
+
+  function setControlBusy(control) {
+    if (!control) return;
+
+    control.setAttribute('aria-disabled', String(busy));
+    if ('disabled' in control) control.disabled = busy;
   }
 
   function renderControls() {
+    if (!ready) return;
+
     if (input) input.disabled = busy;
-    if (applyControl) {
-      applyControl.setAttribute('aria-disabled', String(busy));
-      if ('disabled' in applyControl) applyControl.disabled = busy;
-    }
-    if (removeControl) {
-      removeControl.style.display = appliedDiscount ? '' : 'none';
-      removeControl.setAttribute('aria-disabled', String(busy));
-      if ('disabled' in removeControl) removeControl.disabled = busy;
-    }
+    setControlBusy(applyControl);
+    appliedDiscountsWrapper
+      ?.querySelectorAll('[data-applied-discount-generated="true"]')
+      .forEach((row) => {
+        setControlBusy(row.querySelector('[data-applied-discount-remove="true"]'));
+      });
   }
 
   function setRequestedCode(code) {
     requestedCode = normalizeDiscountCode(code);
-    if (input) input.value = requestedCode;
+    if (ready) input.value = requestedCode;
+  }
+
+  function renderAppliedDiscounts() {
+    if (!ready) return;
+
+    appliedDiscountsWrapper
+      .querySelectorAll('[data-applied-discount-generated="true"]')
+      .forEach((row) => row.remove());
+
+    appliedDiscounts.forEach((discount) => {
+      const row = appliedDiscountTemplate.cloneNode(true);
+      const codeElement = row.querySelector('[data-applied-discount-code="true"]');
+      const removeControl = row.querySelector('[data-applied-discount-remove="true"]');
+
+      row.removeAttribute('data-applied-discount-template');
+      row.setAttribute('data-applied-discount-generated', 'true');
+      row.hidden = false;
+      row.style.display = '';
+
+      if (codeElement) codeElement.textContent = normalizeDiscountCode(discount.code);
+      setControlBusy(removeControl);
+
+      removeControl?.addEventListener('click', async (event) => {
+        event.preventDefault();
+
+        if (busy) return;
+
+        clearMessages();
+
+        try {
+          await onRemove();
+          clearDiscount({ announce: true });
+        } catch (error) {
+          console.error('Discount removal failed:', error);
+          showErrorMessage('Discount code could not be removed.');
+        }
+      });
+
+      appliedDiscountsWrapper.appendChild(row);
+    });
+
+    renderControls();
   }
 
   function setAppliedDiscount(discount) {
-    appliedDiscount = discount && typeof discount === 'object' ? { ...discount } : null;
-    setRequestedCode(appliedDiscount?.code || '');
-    renderControls();
+    appliedDiscounts = toSingleAppliedDiscount(discount);
+    setRequestedCode('');
+    renderAppliedDiscounts();
 
-    if (appliedDiscount) {
-      showMessage(`${appliedDiscount.code} has been applied.`, 'success');
+    if (appliedDiscounts[0]) {
+      showSuccess(`${normalizeDiscountCode(appliedDiscounts[0].code)} has been applied.`);
     } else {
-      showMessage('');
+      clearMessages();
     }
   }
 
   function clearDiscount({ announce = false } = {}) {
-    appliedDiscount = null;
+    appliedDiscounts = [];
     setRequestedCode('');
-    renderControls();
-    showMessage(announce ? 'Discount code removed.' : '', announce ? 'success' : 'status');
+    renderAppliedDiscounts();
+
+    if (announce) {
+      showSuccess('Discount code removed.');
+    } else {
+      clearMessages();
+    }
   }
 
   function setBusy(nextBusy) {
@@ -111,9 +211,10 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
 
       const code = normalizeDiscountCode(input.value);
       setRequestedCode(code);
+      clearMessages();
 
       if (!code) {
-        showMessage(DISCOUNT_MESSAGES.invalid_code, 'error');
+        showErrorMessage(DISCOUNT_MESSAGES.invalid_code);
         return;
       }
 
@@ -121,32 +222,21 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
         await onApply(code);
       } catch (error) {
         console.error('Discount application failed:', error);
-        showMessage(getDiscountErrorMessage(error), 'error');
-      }
-    });
-
-    removeControl?.addEventListener('click', async (event) => {
-      event.preventDefault();
-
-      if (busy) return;
-
-      try {
-        await onRemove();
-      } catch (error) {
-        console.error('Discount removal failed:', error);
-        showMessage('Discount code could not be removed.', 'error');
+        showErrorMessage(getDiscountErrorMessage(error));
       }
     });
   }
 
-  renderControls();
-  showMessage('');
+  if (ready) {
+    renderAppliedDiscounts();
+    clearMessages();
+  }
 
   return Object.freeze({
     available: ready,
     clearDiscount,
     getAppliedDiscount() {
-      return appliedDiscount ? { ...appliedDiscount } : null;
+      return appliedDiscounts[0] ? { ...appliedDiscounts[0] } : null;
     },
     getRequestedCode() {
       return requestedCode;
@@ -155,11 +245,11 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     setBusy,
     setRequestedCode,
     showError(error) {
-      showMessage(getDiscountErrorMessage(error), 'error');
+      showErrorMessage(getDiscountErrorMessage(error));
     },
     showSelectShipping(code) {
       setRequestedCode(code);
-      showMessage('Select a shipping method to apply this code.', 'status');
+      showSuccess('Select a shipping method to apply this code.');
     },
   });
 }

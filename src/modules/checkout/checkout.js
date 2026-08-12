@@ -356,7 +356,7 @@ export async function initCheckout() {
   shipping = createCheckoutShipping(root, prepareCheckout);
   discountController = createCheckoutDiscount(root, {
     onApply: (code) => replaceDiscount(code),
-    onRemove: () => replaceDiscount('', { announceRemoval: true }),
+    onRemove: () => replaceDiscount(''),
   });
 
   payButton.addEventListener('click', async (event) => {
