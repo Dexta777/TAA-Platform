@@ -400,6 +400,11 @@ verify_jwt = false
 [functions.stripe-webhook]
 verify_jwt = false
 
+# Private scheduled worker. It additionally requires CHECKOUT_RECONCILIATION_SECRET.
+# No production schedule is activated by repository configuration.
+[functions.reconcile-checkout-reservations]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 

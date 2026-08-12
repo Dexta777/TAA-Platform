@@ -556,6 +556,12 @@ BEGIN
     '94000000-0000-0000-0000-000000000002'
   );
 
+  PERFORM public.record_checkout_predecessor_invalidated(
+    v_replacement_id,
+    (SELECT id FROM orchestration_test_ids WHERE name = 'initial'),
+    '94000000-0000-0000-0000-000000000002'
+  );
+
   PERFORM public.activate_checkout_request(
     v_replacement_id,
     '94000000-0000-0000-0000-000000000002',
@@ -573,7 +579,7 @@ SELECT ok(
     JOIN orchestration_test_ids AS replacement ON replacement.name = 'replacement'
     WHERE attempts.id = '92000000-0000-0000-0000-000000000001'
   ),
-  'replacement activation performs the A to B compare-and-swap'
+  'replacement activation follows the predecessor checkpoint and completes the B compare-and-swap'
 );
 
 SELECT ok(
@@ -585,7 +591,7 @@ SELECT ok(
     FROM public.checkout_intents
     WHERE id = (SELECT id FROM orchestration_test_ids WHERE name = 'initial')
   ),
-  'replacement activation supersedes A and clears its confirmation capability'
+  'the predecessor checkpoint supersedes A and clears its confirmation capability'
 );
 
 SELECT ok(

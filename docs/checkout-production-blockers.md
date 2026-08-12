@@ -1,18 +1,28 @@
 # Checkout Sessions production blockers
 
-## Inventory race after Session creation
+## Reservation-v1 activation readiness
 
-The checkout validates current stock when it creates a Checkout Session, but it does not reserve
-that stock. Inventory can therefore change before payment completes. The atomic finalizer correctly
-refuses to oversell, but that means a successfully paid Checkout Session can still fail order
-finalization.
+Slice 5C implements attempt-owned stock reservation, atomic paid consumption, authoritative Stripe
+lifecycle handling, and durable reconciliation. `CHECKOUT_RESERVATIONS_ENABLED` remains off.
 
-This is a production blocker. Before cutover, choose and implement one of these recovery models:
+Before enabling it in production:
 
-1. Reserve inventory for a bounded period when the Session is created, then release it when the
-   Session expires or checkout is abandoned.
-2. Keep finalization-time stock validation and add a reliable automatic refund plus customer and
-   operations notification path for paid checkouts that cannot be fulfilled.
+1. Deploy and verify the additive Slice 5C migration and both Edge Functions while the feature flag
+   remains off.
+2. Provision a high-entropy `CHECKOUT_RECONCILIATION_SECRET` independently in each environment.
+3. Configure external monitoring for open `checkout_lifecycle_incidents`, especially every
+   `paid_*` incident.
+4. Verify the reconciliation worker manually, then activate a one-to-two-minute production
+   schedule. No schedule is created by the repository migration.
+5. Confirm the worker can retrieve, expire, list, and recover Checkout Sessions with bounded
+   pagination.
+6. Establish an operator runbook for refunding or manually fulfilling paid incidents.
+7. Run an end-to-end payment, delayed-payment, replacement, expiry, and missed-webhook exercise in
+   staging before enabling the feature flag.
+
+An overdue local reservation is never released solely because its timestamp elapsed. Stripe must
+authoritatively prove that no payable path remains. Stripe unavailability therefore retains stock
+and retries later.
 
 ## Klaviyo delivery after webhook replay
 

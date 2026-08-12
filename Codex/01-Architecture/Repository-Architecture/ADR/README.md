@@ -139,7 +139,7 @@ Rectification:
 
 ## ADR Index
 
-No Architecture Decision Records have yet been accepted.
+- [ADR-0001 — Reservation-Owned Checkout Finalization](ADR-0001-reservation-owned-checkout-finalization.md)
 
 ---
 

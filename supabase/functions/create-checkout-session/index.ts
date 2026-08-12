@@ -686,6 +686,44 @@ async function handleProtocolReplacement(
     );
   }
 
+  try {
+    await callCheckoutRpc(supabase, 'record_checkout_predecessor_invalidated', {
+      p_replacement_intent_id: snapshot.id,
+      p_predecessor_intent_id: snapshot.replaces_checkout_intent_id,
+      p_worker_lease_id: workerLeaseId,
+    });
+  } catch (checkpointError) {
+    try {
+      await callCheckoutRpc(supabase, 'mark_checkout_reconciliation_required', {
+        p_checkout_intent_id: snapshot.id,
+        p_worker_lease_id: workerLeaseId,
+        p_failure_code: 'predecessor_checkpoint_failed',
+      });
+      await callCheckoutRpc(supabase, 'enqueue_checkout_reconciliation', {
+        p_checkout_attempt_id: snapshot.checkout_attempt_id,
+        p_checkout_intent_id: snapshot.id,
+        p_lifecycle_incident_id: null,
+        p_reason: 'predecessor_checkpoint_failed',
+        p_manual_review: false,
+      });
+    } catch (reconciliationError) {
+      console.error('CHECKOUT PREDECESSOR CHECKPOINT RECOVERY FAILED:', {
+        checkout_attempt_id: snapshot.checkout_attempt_id,
+        checkout_intent_id: snapshot.id,
+        checkpoint_error: checkpointError instanceof Error ? checkpointError.message : 'unknown',
+        reconciliation_error:
+          reconciliationError instanceof Error ? reconciliationError.message : 'unknown',
+      });
+      throw new Error('Checkout predecessor invalidation could not be durably recorded.');
+    }
+
+    throw new CheckoutProtocolRequestError(
+      'Checkout requires reconciliation before it can continue.',
+      409,
+      'reconciliation_required'
+    );
+  }
+
   return previousSnapshot;
 }
 

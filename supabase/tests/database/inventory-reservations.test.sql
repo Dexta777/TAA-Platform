@@ -658,8 +658,31 @@ SELECT lives_ok(
   'a second attempt can reserve stock released by the first'
 );
 
+INSERT INTO public.orders (
+  id,
+  email,
+  order_number,
+  status,
+  total,
+  checkout_intent_id,
+  checkout_attempt_id
+)
+VALUES (
+  '71000000-0000-0000-0000-000000000004',
+  'consumed-reservation@example.com',
+  'TAA-RESERVATION-CONSUMED-TEST',
+  'paid',
+  10.00,
+  '51000000-0000-0000-0000-000000000006',
+  '41000000-0000-0000-0000-000000000004'
+);
+
 UPDATE public.inventory_reservations
-SET status = 'consumed', consumed_at = clock_timestamp(), updated_at = clock_timestamp()
+SET
+  status = 'consumed',
+  consumed_at = clock_timestamp(),
+  order_id = '71000000-0000-0000-0000-000000000004',
+  updated_at = clock_timestamp()
 WHERE checkout_attempt_id = '41000000-0000-0000-0000-000000000004';
 
 SELECT throws_ok(

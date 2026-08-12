@@ -6,6 +6,15 @@ import {
   parseOriginalShippingAmount,
   reconcilePaidDiscountEconomics,
 } from '../_shared/checkout-discounts.ts';
+import {
+  CheckoutLifecycleValidationError,
+  classifyAuthoritativeCheckoutSession,
+  isPaidInFlightReplacement,
+  validateAuthoritativeCheckoutSession,
+  type CheckoutLifecycleCandidate,
+} from '../_shared/checkout-lifecycle.ts';
+import { callCheckoutRpc } from '../_shared/checkout-orchestration.ts';
+import { getStripeIdempotencyKeys } from '../_shared/checkout-protocol.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 
@@ -286,7 +295,20 @@ async function finalizeOrder({
 
   const result = data[0];
 
-  if (!result.already_finalized) {
+  if (result.finalization_outcome === 'manual_review_required') {
+    if (!result.incident_id) {
+      throw new Error('Manual-review finalization was not durably recorded.');
+    }
+
+    console.error('HIGH SEVERITY: PAID CHECKOUT REQUIRES MANUAL REVIEW:', {
+      checkout_session_id: checkoutSessionId,
+      payment_intent_id: paymentIntentId,
+      lifecycle_incident_id: result.incident_id,
+    });
+    return result;
+  }
+
+  if (result.finalization_outcome === 'finalized' && !result.already_finalized) {
     await sendKlaviyoForOrder(result.order_id);
   }
 
@@ -486,6 +508,251 @@ async function fulfillCheckoutSession(checkoutSessionId: string) {
   });
 }
 
+async function loadCheckoutLifecycleCandidate(checkoutSessionId: string) {
+  const { data: intent, error: intentError } = await supabase
+    .from('checkout_intents')
+    .select(
+      'id, checkout_attempt_id, checkout_request_id, replaces_checkout_intent_id, checkout_protocol_version, predecessor_invalidated_at, stripe_checkout_session_id, payment_intent_id, currency, subtotal_amount'
+    )
+    .eq('stripe_checkout_session_id', checkoutSessionId)
+    .maybeSingle();
+
+  if (intentError) throw new Error('Checkout lifecycle candidate could not be loaded.');
+  if (!intent || intent.checkout_protocol_version !== 'reservation_v1') return null;
+
+  const { data: attempt, error: attemptError } = await supabase
+    .from('checkout_attempts')
+    .select('active_checkout_intent_id, in_flight_checkout_intent_id')
+    .eq('id', intent.checkout_attempt_id)
+    .maybeSingle();
+
+  if (attemptError || !attempt) {
+    throw new Error('Checkout lifecycle attempt could not be loaded.');
+  }
+
+  return { ...intent, ...attempt } as CheckoutLifecycleCandidate;
+}
+
+async function recordLifecycleIncident({
+  candidate,
+  incidentType,
+  paymentIntentId,
+  reason,
+}: {
+  candidate: CheckoutLifecycleCandidate;
+  incidentType: string;
+  paymentIntentId: string | null;
+  reason: string;
+}) {
+  const incidentId = await callCheckoutRpc<string>(supabase, 'record_checkout_lifecycle_incident', {
+    p_incident_type: incidentType,
+    p_checkout_attempt_id: candidate.checkout_attempt_id,
+    p_checkout_intent_id: candidate.id,
+    p_stripe_checkout_session_id: candidate.stripe_checkout_session_id,
+    p_payment_intent_id: paymentIntentId,
+    p_diagnostic_details: { reason },
+  });
+
+  if (!incidentId) throw new Error('Checkout lifecycle incident was not durably recorded.');
+
+  return incidentId;
+}
+
+async function resolvePaidInFlightPredecessor(candidate: CheckoutLifecycleCandidate) {
+  if (!candidate.replaces_checkout_intent_id) return candidate;
+
+  const workerLeaseId = crypto.randomUUID();
+  const leaseAcquired = await callCheckoutRpc<boolean>(supabase, 'claim_checkout_lifecycle_work', {
+    p_checkout_intent_id: candidate.id,
+    p_worker_lease_id: workerLeaseId,
+  });
+
+  if (!leaseAcquired) {
+    await recordLifecycleIncident({
+      candidate,
+      incidentType: 'paid_path_conflict',
+      paymentIntentId: candidate.payment_intent_id,
+      reason: 'predecessor_resolution_lease_unavailable',
+    });
+    return null;
+  }
+
+  const { data: predecessor, error } = await supabase
+    .from('checkout_intents')
+    .select('id, checkout_request_id, stripe_checkout_session_id')
+    .eq('id', candidate.replaces_checkout_intent_id)
+    .maybeSingle();
+
+  if (error || !predecessor?.stripe_checkout_session_id) {
+    await recordLifecycleIncident({
+      candidate,
+      incidentType: 'paid_path_conflict',
+      paymentIntentId: candidate.payment_intent_id,
+      reason: 'predecessor_session_missing',
+    });
+    return null;
+  }
+
+  let predecessorSession: Stripe.Checkout.Session;
+
+  try {
+    predecessorSession = await stripe.checkout.sessions.retrieve(
+      predecessor.stripe_checkout_session_id
+    );
+
+    if (predecessorSession.status === 'open' && predecessorSession.payment_status === 'unpaid') {
+      const keys = getStripeIdempotencyKeys(
+        candidate.checkout_attempt_id,
+        candidate.checkout_request_id
+      );
+      await stripe.checkout.sessions.expire(
+        predecessorSession.id,
+        {},
+        { idempotencyKey: keys.expirePrevious }
+      );
+      predecessorSession = await stripe.checkout.sessions.retrieve(predecessorSession.id);
+    }
+  } catch {
+    await recordLifecycleIncident({
+      candidate,
+      incidentType: 'paid_path_conflict',
+      paymentIntentId: candidate.payment_intent_id,
+      reason: 'predecessor_state_unavailable',
+    });
+    return null;
+  }
+
+  if (predecessorSession.status !== 'expired' || predecessorSession.payment_status !== 'unpaid') {
+    await recordLifecycleIncident({
+      candidate,
+      incidentType: 'paid_path_conflict',
+      paymentIntentId: candidate.payment_intent_id,
+      reason: 'predecessor_not_safely_invalidated',
+    });
+    return null;
+  }
+
+  await callCheckoutRpc(supabase, 'record_checkout_predecessor_invalidated', {
+    p_replacement_intent_id: candidate.id,
+    p_predecessor_intent_id: predecessor.id,
+    p_worker_lease_id: workerLeaseId,
+  });
+
+  return await loadCheckoutLifecycleCandidate(candidate.stripe_checkout_session_id);
+}
+
+async function reconcileReservationCheckoutSession(checkoutSessionId: string, eventType: string) {
+  let candidate = await loadCheckoutLifecycleCandidate(checkoutSessionId);
+
+  if (!candidate) throw new Error('Reservation checkout lifecycle candidate was not found.');
+
+  const session = await stripe.checkout.sessions.retrieve(checkoutSessionId, {
+    expand: ['payment_intent.payment_method', 'shipping_cost.shipping_rate'],
+  });
+
+  try {
+    validateAuthoritativeCheckoutSession(session, candidate, { requireCurrentPointer: false });
+  } catch (error) {
+    if (!(error instanceof CheckoutLifecycleValidationError)) throw error;
+
+    await recordLifecycleIncident({
+      candidate,
+      incidentType: 'stripe_session_match_conflict',
+      paymentIntentId: getResourceId(session.payment_intent),
+      reason: error.code,
+    });
+
+    return { lifecycleOutcome: 'manual_review_required', safeTerminal: false };
+  }
+
+  const action = classifyAuthoritativeCheckoutSession(session);
+
+  if (action === 'finalize') {
+    if (isPaidInFlightReplacement(candidate)) {
+      const resolvedCandidate = await resolvePaidInFlightPredecessor(candidate);
+
+      if (!resolvedCandidate) {
+        return { lifecycleOutcome: 'manual_review_required', safeTerminal: false };
+      }
+
+      candidate = resolvedCandidate;
+      validateAuthoritativeCheckoutSession(session, candidate, { requireCurrentPointer: false });
+    }
+
+    const paymentIntent =
+      typeof session.payment_intent === 'string'
+        ? await stripe.paymentIntents.retrieve(session.payment_intent, {
+            expand: ['payment_method'],
+          })
+        : session.payment_intent;
+    const identifiers = await updateCheckoutIntentFromSession(session, paymentIntent);
+    const paymentDetails = await getPaymentDetails(paymentIntent);
+    const result = await finalizeOrder({
+      checkoutSessionId: session.id,
+      paymentIntentId: identifiers.paymentIntentId,
+      stripeCustomerId: identifiers.stripeCustomerId,
+      paymentDetails,
+    });
+
+    return {
+      lifecycleOutcome: result.finalization_outcome,
+      safeTerminal: result.finalization_outcome !== 'manual_review_required',
+    };
+  }
+
+  if (eventType === 'checkout.session.async_payment_failed') {
+    const result = await callCheckoutRpc<{ lifecycle_outcome: string }>(
+      supabase,
+      'transition_checkout_session_terminal',
+      {
+        p_checkout_session_id: session.id,
+        p_reason: 'async_payment_failed',
+      }
+    );
+
+    return { lifecycleOutcome: result?.lifecycle_outcome, safeTerminal: true };
+  }
+
+  if (action === 'payment_pending') {
+    const result = await callCheckoutRpc<{ lifecycle_outcome: string }>(
+      supabase,
+      'mark_checkout_payment_pending',
+      {
+        p_checkout_session_id: session.id,
+        p_payment_intent_id: getResourceId(session.payment_intent),
+      }
+    );
+
+    return { lifecycleOutcome: result?.lifecycle_outcome, safeTerminal: false };
+  }
+
+  if (action === 'expired_unpaid') {
+    const result = await callCheckoutRpc<{ lifecycle_outcome: string }>(
+      supabase,
+      'transition_checkout_session_terminal',
+      {
+        p_checkout_session_id: session.id,
+        p_reason: 'expired_unpaid',
+      }
+    );
+
+    return { lifecycleOutcome: result?.lifecycle_outcome, safeTerminal: true };
+  }
+
+  if (action === 'retain') {
+    return { lifecycleOutcome: 'retained', safeTerminal: false };
+  }
+
+  await recordLifecycleIncident({
+    candidate,
+    incidentType: 'stripe_session_match_conflict',
+    paymentIntentId: getResourceId(session.payment_intent),
+    reason: 'unsupported_authoritative_session_state',
+  });
+
+  return { lifecycleOutcome: 'manual_review_required', safeTerminal: false };
+}
+
 async function handleLegacyPaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent) {
   if (paymentIntent.metadata.checkout_intent_id) {
     console.log('Checkout-owned PaymentIntent deferred to Checkout Session fulfillment.');
@@ -550,30 +817,39 @@ serve(async (request) => {
       case 'checkout.session.completed':
       case 'checkout.session.async_payment_succeeded': {
         const session = event.data.object as Stripe.Checkout.Session;
+        const candidate = await loadCheckoutLifecycleCandidate(session.id);
 
-        try {
-          await fulfillCheckoutSession(session.id);
-        } finally {
-          await cleanupTemporaryCouponForSession(session.id, event.type);
+        if (candidate) {
+          const result = await reconcileReservationCheckoutSession(session.id, event.type);
+
+          if (result.safeTerminal) {
+            await cleanupTemporaryCouponForSession(session.id, event.type);
+          }
+        } else {
+          try {
+            await fulfillCheckoutSession(session.id);
+          } finally {
+            await cleanupTemporaryCouponForSession(session.id, event.type);
+          }
         }
         break;
       }
-      case 'checkout.session.async_payment_failed': {
-        const session = event.data.object as Stripe.Checkout.Session;
-
-        try {
-          await updateCheckoutSessionStatus(session.id, 'failed');
-        } finally {
-          await cleanupTemporaryCouponForSession(session.id, event.type);
-        }
-        break;
-      }
+      case 'checkout.session.async_payment_failed':
       case 'checkout.session.expired': {
         const session = event.data.object as Stripe.Checkout.Session;
+        const candidate = await loadCheckoutLifecycleCandidate(session.id);
 
-        try {
-          await updateCheckoutSessionStatus(session.id, 'expired');
-        } finally {
+        if (candidate) {
+          const result = await reconcileReservationCheckoutSession(session.id, event.type);
+
+          if (result.safeTerminal) {
+            await cleanupTemporaryCouponForSession(session.id, event.type);
+          }
+        } else {
+          await updateCheckoutSessionStatus(
+            session.id,
+            event.type === 'checkout.session.expired' ? 'expired' : 'failed'
+          );
           await cleanupTemporaryCouponForSession(session.id, event.type);
         }
         break;
