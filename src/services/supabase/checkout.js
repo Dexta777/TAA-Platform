@@ -1,5 +1,37 @@
 import { supabase } from './client.js';
 
+const SAFE_DISCOUNT_ERRORS = new Set([
+  'invalid_code',
+  'minimum_subtotal_not_met',
+  'account_required',
+  'not_eligible',
+  'discount_unavailable',
+]);
+const SAFE_REPLACEMENT_ERRORS = new Set([
+  'previous_checkout_usable',
+  'previous_checkout_unavailable',
+]);
+
+export class CheckoutRequestError extends Error {
+  constructor(
+    message,
+    {
+      cause,
+      status = null,
+      discountError = null,
+      minimumSubtotalAmount = null,
+      checkoutReplacementError = null,
+    } = {}
+  ) {
+    super(message, { cause });
+    this.name = 'CheckoutRequestError';
+    this.status = status;
+    this.discountError = discountError;
+    this.minimumSubtotalAmount = minimumSubtotalAmount;
+    this.checkoutReplacementError = checkoutReplacementError;
+  }
+}
+
 function normalizeCartForCheckout(cart) {
   if (!Array.isArray(cart) || cart.length === 0) {
     throw new Error('Your basket is empty.');
@@ -17,16 +49,37 @@ async function getInvocationError(error, fallbackMessage) {
   if (response instanceof Response) {
     try {
       const payload = await response.clone().json();
+      const message =
+        typeof payload?.error === 'string' && payload.error.trim()
+          ? payload.error.trim()
+          : fallbackMessage;
+      const discountError = SAFE_DISCOUNT_ERRORS.has(payload?.discount_error)
+        ? payload.discount_error
+        : null;
+      const minimumSubtotalAmount =
+        Number.isSafeInteger(payload?.minimum_subtotal_amount) &&
+        payload.minimum_subtotal_amount >= 0
+          ? payload.minimum_subtotal_amount
+          : null;
+      const checkoutReplacementError = SAFE_REPLACEMENT_ERRORS.has(
+        payload?.checkout_replacement_error
+      )
+        ? payload.checkout_replacement_error
+        : null;
 
-      if (typeof payload?.error === 'string' && payload.error.trim()) {
-        return new Error(payload.error.trim(), { cause: error });
-      }
+      return new CheckoutRequestError(message, {
+        cause: error,
+        status: response.status,
+        discountError,
+        minimumSubtotalAmount,
+        checkoutReplacementError,
+      });
     } catch {
       // The fallback below deliberately avoids exposing an unexpected response body.
     }
   }
 
-  return new Error(fallbackMessage, { cause: error });
+  return new CheckoutRequestError(fallbackMessage, { cause: error });
 }
 
 async function invokeCheckoutFunction(functionName, body, fallbackMessage) {
@@ -51,22 +104,37 @@ export function getShippingOptions(cart) {
   );
 }
 
-export function createCheckoutSession({ cart, shippingMethodName, addressData }) {
-  return invokeCheckoutFunction(
-    'create-checkout-session',
-    {
-      cart: normalizeCartForCheckout(cart),
-      shipping_method_name: String(shippingMethodName ?? '').trim(),
-      shipping_name: addressData.shipping.name || undefined,
-      shipping_phone: addressData.shipping.phone || undefined,
-      shipping_address: addressData.shipping.address,
-      billing_name: addressData.billing.name || undefined,
-      billing_address: addressData.billing.address,
-      billing_is_different: addressData.billingIsDifferent,
-      create_account_requested: false,
-    },
-    'Payment could not be prepared.'
-  );
+export function createCheckoutSession({
+  cart,
+  shippingMethodName,
+  addressData,
+  discountCode,
+  replaceCheckoutSessionId,
+  replaceConfirmationToken,
+}) {
+  const normalizedDiscountCode = String(discountCode ?? '').trim();
+  const normalizedReplacementSessionId = String(replaceCheckoutSessionId ?? '').trim();
+  const normalizedReplacementToken = String(replaceConfirmationToken ?? '').trim();
+  const body = {
+    cart: normalizeCartForCheckout(cart),
+    shipping_method_name: String(shippingMethodName ?? '').trim(),
+    shipping_name: addressData.shipping.name || undefined,
+    shipping_phone: addressData.shipping.phone || undefined,
+    shipping_address: addressData.shipping.address,
+    billing_name: addressData.billing.name || undefined,
+    billing_address: addressData.billing.address,
+    billing_is_different: addressData.billingIsDifferent,
+    create_account_requested: false,
+    ...(normalizedDiscountCode ? { discount_code: normalizedDiscountCode } : {}),
+    ...(normalizedReplacementSessionId
+      ? { replace_checkout_session_id: normalizedReplacementSessionId }
+      : {}),
+    ...(normalizedReplacementSessionId && normalizedReplacementToken
+      ? { replace_confirmation_token: normalizedReplacementToken }
+      : {}),
+  };
+
+  return invokeCheckoutFunction('create-checkout-session', body, 'Payment could not be prepared.');
 }
 
 export function updateCheckoutDetails({ checkoutSessionId, confirmationToken, addressData }) {

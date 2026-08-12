@@ -9,6 +9,7 @@ import {
 } from '../_shared/checkout-catalog.ts';
 import {
   CONFIRMATION_CAPABILITY_TTL_MS,
+  authorizeCheckoutAccess,
   cleanCheckoutAddress,
   getAuthenticatedUser,
   sha256Hex,
@@ -22,6 +23,11 @@ import {
   mapPublicDiscountError,
   verifyCreatedDiscountEconomics,
 } from '../_shared/checkout-discounts.ts';
+import {
+  CheckoutReplacementConflictError,
+  completeCheckoutReplacement,
+  validateReplacementAccess,
+} from '../_shared/checkout-replacement.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 const CHECKOUT_RETURN_URL =
@@ -67,6 +73,20 @@ class DiscountEligibilityError extends Error {
     this.name = 'DiscountEligibilityError';
     this.publicReason = publicReason;
     this.minimumSubtotalAmount = minimumSubtotalAmount;
+  }
+}
+
+class CheckoutReplacementRequestError extends Error {
+  status: number;
+
+  constructor(status: number) {
+    super(
+      status === 403
+        ? 'Checkout replacement is not authorized.'
+        : 'Checkout can no longer be replaced.'
+    );
+    this.name = 'CheckoutReplacementRequestError';
+    this.status = status;
   }
 }
 
@@ -221,6 +241,7 @@ async function deleteTemporaryCouponBestEffort(couponId: string | null, context:
 async function expireCheckoutSessionBestEffort(sessionId: string, context: string) {
   try {
     await stripe.checkout.sessions.expire(sessionId);
+    return true;
   } catch (error) {
     console.error('STRIPE CHECKOUT SESSION EXPIRY FAILED:', {
       context,
@@ -228,6 +249,73 @@ async function expireCheckoutSessionBestEffort(sessionId: string, context: strin
       ...getStripeErrorDetails(error),
     });
   }
+
+  try {
+    const checkout = await stripe.checkout.sessions.retrieve(sessionId);
+
+    return checkout.status === 'expired' && checkout.payment_status === 'unpaid';
+  } catch {
+    return false;
+  }
+}
+
+async function updateCheckoutIntentStatusBestEffort(
+  checkoutIntentId: string,
+  status: string,
+  context: string
+) {
+  const { error } = await supabase
+    .from('checkout_intents')
+    .update({ status })
+    .eq('id', checkoutIntentId);
+
+  if (error) {
+    console.error('CHECKOUT INTENT STATUS UPDATE FAILED:', {
+      context,
+      checkout_intent_id: checkoutIntentId,
+      status,
+    });
+  }
+}
+
+async function compensateNewCheckoutBestEffort({
+  checkoutSessionId,
+  checkoutIntentId,
+  stripeCouponId,
+}: {
+  checkoutSessionId: string;
+  checkoutIntentId: string;
+  stripeCouponId: string | null;
+}) {
+  let checkoutInvalidated = false;
+
+  try {
+    await stripe.checkout.sessions.expire(checkoutSessionId);
+    checkoutInvalidated = true;
+  } catch {
+    try {
+      const checkout = await stripe.checkout.sessions.retrieve(checkoutSessionId);
+      checkoutInvalidated = checkout.status === 'expired' && checkout.payment_status === 'unpaid';
+    } catch {
+      // The high-severity diagnostic below records that invalidation could not be proven.
+    }
+  }
+
+  if (!checkoutInvalidated) {
+    console.error('HIGH SEVERITY: REPLACEMENT CHECKOUT COMPENSATION UNCONFIRMED:', {
+      checkout_session_id: checkoutSessionId,
+      checkout_intent_id: checkoutIntentId,
+    });
+  }
+
+  await updateCheckoutIntentStatusBestEffort(
+    checkoutIntentId,
+    checkoutInvalidated ? 'expired' : 'failed',
+    'replacement_compensation'
+  );
+  await deleteTemporaryCouponBestEffort(stripeCouponId, 'replacement_compensation');
+
+  return checkoutInvalidated;
 }
 
 serve(async (request) => {
@@ -238,6 +326,11 @@ serve(async (request) => {
   if (request.method !== 'POST') {
     return jsonResponse({ error: 'Method not allowed.' }, 405);
   }
+
+  let replacementRequested = false;
+  let replacementHandoffStarted = false;
+  let replacementCheckoutCreated = false;
+  let replacementCheckoutInvalidated = false;
 
   try {
     let payload;
@@ -255,6 +348,37 @@ serve(async (request) => {
     const cart = Array.isArray(payload.cart) ? payload.cart : [];
     const shippingMethodName = cleanText(payload.shipping_method_name, 200);
     const discountCode = cleanText(payload.discount_code, 200);
+    const replaceCheckoutSessionId = cleanText(payload.replace_checkout_session_id, 255);
+    const replaceConfirmationToken = cleanText(payload.replace_confirmation_token, 255);
+
+    if (replaceConfirmationToken && !replaceCheckoutSessionId) {
+      throw new CheckoutInputError('Checkout replacement details are incomplete.');
+    }
+
+    replacementRequested = Boolean(replaceCheckoutSessionId);
+    const authenticatedUser = await getAuthenticatedUser(supabase, request);
+    let previousCheckoutIntent = null;
+
+    if (replaceCheckoutSessionId) {
+      const authorization = await authorizeCheckoutAccess(
+        supabase,
+        request,
+        replaceCheckoutSessionId,
+        replaceConfirmationToken
+      );
+      const access = validateReplacementAccess({
+        authorized: authorization.authorized,
+        previousStatus: authorization.checkoutIntent?.status || null,
+        previousUserId: authorization.checkoutIntent?.user_id || null,
+        authenticatedUserId: authenticatedUser?.id || null,
+      });
+
+      if (!access.allowed || !authorization.checkoutIntent) {
+        throw new CheckoutReplacementRequestError(access.status);
+      }
+
+      previousCheckoutIntent = authorization.checkoutIntent;
+    }
 
     if (!shippingMethodName) {
       throw new CheckoutInputError('Please select a shipping method.');
@@ -282,7 +406,6 @@ serve(async (request) => {
       ...shippingOptions.filter((option) => option.id !== selectedShippingOption.id),
     ];
     const checkoutIntentId = crypto.randomUUID();
-    const authenticatedUser = await getAuthenticatedUser(supabase, request);
     const stripeCustomer = await getStripeCustomer(authenticatedUser?.id);
     const customerEmail = stripeCustomer.email || null;
     const trustedIdentityEmail = cleanText(authenticatedUser?.email, 320) || null;
@@ -387,6 +510,7 @@ serve(async (request) => {
           },
         },
       });
+      replacementCheckoutCreated = replacementRequested;
 
       if (!session.client_secret) {
         throw new Error('Stripe did not return a Checkout client secret.');
@@ -419,7 +543,10 @@ serve(async (request) => {
       }
 
       if (session) {
-        await expireCheckoutSessionBestEffort(session.id, 'session_creation_compensation');
+        replacementCheckoutInvalidated = await expireCheckoutSessionBestEffort(
+          session.id,
+          'session_creation_compensation'
+        );
       }
 
       await deleteTemporaryCouponBestEffort(stripeCouponId, 'session_creation_compensation');
@@ -467,7 +594,10 @@ serve(async (request) => {
     });
 
     if (checkoutIntentError) {
-      await expireCheckoutSessionBestEffort(session.id, 'checkout_intent_insert_failure');
+      replacementCheckoutInvalidated = await expireCheckoutSessionBestEffort(
+        session.id,
+        'checkout_intent_insert_failure'
+      );
       await deleteTemporaryCouponBestEffort(stripeCouponId, 'checkout_intent_insert_failure');
       throw new Error('Checkout intent could not be created.');
     }
@@ -481,9 +611,58 @@ serve(async (request) => {
         .from('checkout_intents')
         .update({ status: 'failed' })
         .eq('id', checkoutIntentId);
-      await expireCheckoutSessionBestEffort(session.id, 'checkout_items_insert_failure');
+      replacementCheckoutInvalidated = await expireCheckoutSessionBestEffort(
+        session.id,
+        'checkout_items_insert_failure'
+      );
       await deleteTemporaryCouponBestEffort(stripeCouponId, 'checkout_items_insert_failure');
       throw new Error('Checkout items could not be created.');
+    }
+
+    if (previousCheckoutIntent && replaceCheckoutSessionId) {
+      replacementHandoffStarted = true;
+
+      await completeCheckoutReplacement({
+        expirePreviousCheckout: async () => {
+          await stripe.checkout.sessions.expire(replaceCheckoutSessionId);
+        },
+        retrievePreviousCheckout: async () => {
+          const previousSession = await stripe.checkout.sessions.retrieve(replaceCheckoutSessionId);
+
+          return {
+            status: previousSession.status,
+            payment_status: previousSession.payment_status,
+          };
+        },
+        compensateNewCheckout: async () => {
+          return compensateNewCheckoutBestEffort({
+            checkoutSessionId: session.id,
+            checkoutIntentId,
+            stripeCouponId,
+          });
+        },
+        markPreviousCheckoutExpired: async () => {
+          const { error } = await supabase
+            .from('checkout_intents')
+            .update({ status: 'expired' })
+            .eq('id', previousCheckoutIntent.id)
+            .eq('status', 'pending');
+
+          if (error) throw new Error('Previous checkout intent status update failed.');
+        },
+        cleanupPreviousCoupon: async () => {
+          await deleteTemporaryCouponBestEffort(
+            previousCheckoutIntent.stripe_coupon_id || null,
+            'checkout_replacement'
+          );
+        },
+        reportNonFatalFailure: (context) => {
+          console.error('CHECKOUT REPLACEMENT NON-FATAL CLEANUP FAILURE:', {
+            context,
+            previous_checkout_intent_id: previousCheckoutIntent.id,
+          });
+        },
+      });
     }
 
     const stripeShippingOptions = session.shipping_options.map((option, index) => ({
@@ -492,6 +671,9 @@ serve(async (request) => {
         orderedShippingOptions[index].shipping,
         discountEvaluation?.discount_type || null
       ),
+      ...(discountEvaluation?.discount_type === 'free_shipping'
+        ? { original_shipping: orderedShippingOptions[index].shipping }
+        : {}),
       stripe_shipping_rate_id:
         typeof option.shipping_rate === 'string' ? option.shipping_rate : option.shipping_rate.id,
     }));
@@ -539,8 +721,39 @@ serve(async (request) => {
       );
     }
 
+    if (error instanceof CheckoutReplacementRequestError) {
+      return jsonResponse({ error: error.message }, error.status);
+    }
+
+    if (error instanceof CheckoutReplacementConflictError) {
+      console.error('CHECKOUT REPLACEMENT CONFLICT:', {
+        checkout_replacement_error: error.publicCode,
+      });
+
+      return jsonResponse(
+        {
+          error: 'Checkout could not be replaced safely.',
+          checkout_replacement_error: error.publicCode,
+        },
+        409
+      );
+    }
+
     console.error('CREATE CHECKOUT SESSION ERROR:', error);
 
-    return jsonResponse({ error: 'Unable to prepare Checkout.' }, 500);
+    return jsonResponse(
+      {
+        error: 'Unable to prepare Checkout.',
+        ...(replacementRequested && !replacementHandoffStarted
+          ? {
+              checkout_replacement_error:
+                !replacementCheckoutCreated || replacementCheckoutInvalidated
+                  ? 'previous_checkout_usable'
+                  : 'previous_checkout_unavailable',
+            }
+          : {}),
+      },
+      500
+    );
   }
 });

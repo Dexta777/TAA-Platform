@@ -10,7 +10,8 @@ import {
   initialiseCheckoutAddress,
   toStripeContact,
 } from './checkout-address.js';
-import { storeCheckoutCapability } from './checkout-capability.js';
+import { removeCheckoutCapability, storeCheckoutCapability } from './checkout-capability.js';
+import { createCheckoutDiscount } from './checkout-discount.js';
 import { createCheckoutShipping } from './checkout-shipping.js';
 import { createCheckoutSummary } from './checkout-summary.js';
 import { validateCheckout } from './checkout-validation.js';
@@ -43,13 +44,23 @@ function applyLockedCustomerEmail(root, lockedCustomerEmail) {
   emailInput.readOnly = true;
 }
 
-function getShippingOptionId(shippingOptions, methodName) {
+function getShippingOption(shippingOptions, methodName) {
   const normalizedMethodName = normalizeMethodName(methodName);
-  const option = shippingOptions.find(
+
+  return shippingOptions.find(
     (candidate) => normalizeMethodName(candidate.name) === normalizedMethodName
   );
+}
 
-  return option?.stripe_shipping_rate_id || '';
+function validatePreparedCheckout(result) {
+  if (
+    !result?.client_secret ||
+    !result.checkout_session_id ||
+    !result.confirmation_token ||
+    !Array.isArray(result.shipping_options)
+  ) {
+    throw new Error('Payment preparation returned an incomplete response.');
+  }
 }
 
 export async function initCheckout() {
@@ -73,13 +84,18 @@ export async function initCheckout() {
   const state = {
     actions: null,
     checkout: null,
+    checkoutGeneration: 0,
     checkoutSessionId: null,
     confirmationToken: null,
+    discount: null,
+    confirming: false,
     payDisabled: true,
     paymentElement: null,
     preparingPromise: null,
     shippingOptions: [],
   };
+  let discountController;
+  let shipping;
 
   function showError(message) {
     if (!errorElement) return;
@@ -95,137 +111,258 @@ export async function initCheckout() {
     payButton.classList.toggle('is-disabled', disabled);
   }
 
-  async function selectStripeShippingOption(methodName) {
-    const shippingOptionId = getShippingOptionId(state.shippingOptions, methodName);
+  function setCheckoutControlsBusy(busy) {
+    discountController?.setBusy(busy);
+    shipping?.setBusy(busy);
+  }
 
-    if (!state.actions || !shippingOptionId) {
+  async function runCheckoutMutation(callback) {
+    while (state.preparingPromise) {
+      try {
+        await state.preparingPromise;
+      } catch {
+        // A queued mutation should still be able to proceed after an earlier failure.
+      }
+    }
+
+    const mutation = Promise.resolve().then(callback);
+    state.preparingPromise = mutation;
+
+    try {
+      return await mutation;
+    } finally {
+      if (state.preparingPromise === mutation) state.preparingPromise = null;
+    }
+  }
+
+  async function updateStripeShippingOption(actions, shippingOptions, methodName) {
+    const option = getShippingOption(shippingOptions, methodName);
+
+    if (!actions || !option?.stripe_shipping_rate_id) {
       throw new Error('The selected shipping method is unavailable.');
     }
 
-    const result = await state.actions.updateShippingOption(shippingOptionId);
+    const result = await actions.updateShippingOption(option.stripe_shipping_rate_id);
 
     if (result.type === 'error') {
       throw new Error(result.error.message || 'The shipping method could not be selected.');
     }
 
-    summary.renderStripeSession(result.session);
+    return { option, session: result.session };
+  }
+
+  async function selectStripeShippingOption(methodName) {
+    const selection = await updateStripeShippingOption(
+      state.actions,
+      state.shippingOptions,
+      methodName
+    );
+
+    summary.renderStripeSession(selection.session, state.discount, selection.option);
+    return selection;
+  }
+
+  async function installPreparedCheckout(result, methodName) {
+    validatePreparedCheckout(result);
+
+    const previousCheckoutSessionId = state.checkoutSessionId;
+    const nextGeneration = state.checkoutGeneration + 1;
+    const addressData = getCheckoutAddressData(root);
+    const checkout = await createCheckoutElementsSdk(
+      result.client_secret,
+      getStripeDefaultValues(addressData)
+    );
+    const actionsResult = await checkout.loadActions();
+
+    if (actionsResult.type === 'error') {
+      throw new Error(actionsResult.error.message || 'Stripe Checkout could not be loaded.');
+    }
+
+    const actions = actionsResult.actions;
+    const selection = await updateStripeShippingOption(
+      actions,
+      result.shipping_options,
+      methodName
+    );
+    const paymentElement = checkout.createPaymentElement({
+      layout: 'tabs',
+      fields: {
+        billingDetails: {
+          name: 'never',
+          address: 'never',
+        },
+      },
+    });
+
+    storeCheckoutCapability(
+      result.checkout_session_id,
+      result.confirmation_token,
+      result.checkout_intent_id
+    );
+    applyLockedCustomerEmail(root, result.locked_customer_email);
+
+    checkout.on('change', (session) => {
+      if (nextGeneration !== state.checkoutGeneration) return;
+
+      const selectedOption = getShippingOption(
+        state.shippingOptions,
+        shipping.getSelectedMethodName()
+      );
+      summary.renderStripeSession(session, state.discount, selectedOption);
+    });
+
+    state.paymentElement?.destroy();
+    paymentElementWrapper.replaceChildren();
+    paymentElement.mount(paymentElementWrapper);
+
+    state.actions = actions;
+    state.checkout = checkout;
+    state.checkoutGeneration = nextGeneration;
+    state.checkoutSessionId = result.checkout_session_id;
+    state.confirmationToken = result.confirmation_token;
+    state.discount = result.discount ? { ...result.discount } : null;
+    state.paymentElement = paymentElement;
+    state.shippingOptions = result.shipping_options.map((option) => ({ ...option }));
+
+    shipping.renderOptions(state.shippingOptions);
+    summary.renderCanonicalItems(result.items);
+    summary.renderPreparedCheckout(result, selection.option);
+    discountController.setAppliedDiscount(state.discount);
+
+    if (previousCheckoutSessionId && previousCheckoutSessionId !== result.checkout_session_id) {
+      removeCheckoutCapability(previousCheckoutSessionId);
+    }
+  }
+
+  async function requestPreparedCheckout(methodName, discountCode, replaceCurrentCheckout) {
+    const addressData = getCheckoutAddressData(root);
+
+    return createCheckoutSession({
+      cart,
+      shippingMethodName: methodName,
+      addressData,
+      discountCode,
+      ...(replaceCurrentCheckout && state.checkoutSessionId
+        ? {
+            replaceCheckoutSessionId: state.checkoutSessionId,
+            replaceConfirmationToken: state.confirmationToken,
+          }
+        : {}),
+    });
   }
 
   async function prepareCheckout(methodName) {
-    if (state.actions) {
-      setPayButton('Updating...', true);
+    await runCheckoutMutation(async () => {
+      setCheckoutControlsBusy(true);
+      setPayButton(state.actions ? 'Updating...' : 'Preparing payment...', true);
+      let succeeded = false;
 
       try {
-        await selectStripeShippingOption(methodName);
+        if (state.actions) {
+          await selectStripeShippingOption(methodName);
+        } else {
+          const result = await requestPreparedCheckout(
+            methodName,
+            discountController.getRequestedCode(),
+            false
+          );
+          await installPreparedCheckout(result, methodName);
+        }
+
+        showError('');
+        succeeded = true;
+      } catch (error) {
+        if (error?.discountError) {
+          discountController.showError(error);
+          showError('');
+        } else {
+          console.error('Checkout preparation failed:', error);
+          showError(error.message || 'Payment could not be prepared.');
+        }
+
+        setPayButton('Payment Unavailable', true);
+      } finally {
+        setCheckoutControlsBusy(false);
+        if (succeeded) setPayButton('Place Order', false);
+      }
+    });
+  }
+
+  function canRestorePreviousCheckout(error, backendReplacementCompleted) {
+    if (!state.actions || backendReplacementCompleted) return false;
+    if (error?.discountError) return true;
+
+    return error?.checkoutReplacementError === 'previous_checkout_usable';
+  }
+
+  async function replaceDiscount(discountCode, { announceRemoval = false } = {}) {
+    const methodName = shipping.getSelectedMethodName();
+
+    if (!discountCode && !state.checkoutSessionId) {
+      discountController.clearDiscount({ announce: announceRemoval });
+      summary.renderDiscount(null);
+      return;
+    }
+
+    if (!methodName) {
+      if (discountCode) {
+        discountController.showSelectShipping(discountCode);
+      } else {
+        discountController.clearDiscount({ announce: announceRemoval });
+        summary.renderDiscount(null);
+      }
+
+      return;
+    }
+
+    await runCheckoutMutation(async () => {
+      const replacingExistingCheckout = Boolean(state.checkoutSessionId);
+      let backendReplacementCompleted = false;
+
+      setCheckoutControlsBusy(true);
+      setPayButton(discountCode ? 'Applying discount...' : 'Removing discount...', true);
+
+      try {
+        const result = await requestPreparedCheckout(
+          methodName,
+          discountCode,
+          replacingExistingCheckout
+        );
+        backendReplacementCompleted = replacingExistingCheckout;
+        await installPreparedCheckout(result, methodName);
+
+        if (!result.discount && announceRemoval) {
+          discountController.clearDiscount({ announce: true });
+        }
+
         showError('');
         setPayButton('Place Order', false);
       } catch (error) {
-        console.error('Checkout shipping update failed:', error);
-        showError(error.message || 'The shipping method could not be selected.');
-        setPayButton('Payment Unavailable', true);
+        if (canRestorePreviousCheckout(error, backendReplacementCompleted)) {
+          setPayButton('Place Order', false);
+        } else {
+          setPayButton('Payment Unavailable', true);
+        }
+
+        throw error;
+      } finally {
+        setCheckoutControlsBusy(false);
       }
-
-      return;
-    }
-
-    if (state.preparingPromise) {
-      await state.preparingPromise;
-
-      if (state.actions) {
-        await prepareCheckout(methodName);
-      }
-
-      return;
-    }
-
-    state.preparingPromise = (async () => {
-      showError('');
-      setPayButton('Preparing payment...', true);
-
-      const addressData = getCheckoutAddressData(root);
-      const result = await createCheckoutSession({
-        cart,
-        shippingMethodName: methodName,
-        addressData,
-      });
-
-      if (
-        !result.client_secret ||
-        !result.checkout_session_id ||
-        !result.confirmation_token ||
-        !Array.isArray(result.shipping_options)
-      ) {
-        throw new Error('Payment preparation returned an incomplete response.');
-      }
-
-      storeCheckoutCapability(
-        result.checkout_session_id,
-        result.confirmation_token,
-        result.checkout_intent_id
-      );
-
-      applyLockedCustomerEmail(root, result.locked_customer_email);
-      const checkoutAddressData = getCheckoutAddressData(root);
-
-      const checkout = await createCheckoutElementsSdk(
-        result.client_secret,
-        getStripeDefaultValues(checkoutAddressData)
-      );
-      const actionsResult = await checkout.loadActions();
-
-      if (actionsResult.type === 'error') {
-        throw new Error(actionsResult.error.message || 'Stripe Checkout could not be loaded.');
-      }
-
-      paymentElementWrapper.replaceChildren();
-
-      const paymentElement = checkout.createPaymentElement({
-        layout: 'tabs',
-        fields: {
-          billingDetails: {
-            name: 'never',
-            address: 'never',
-          },
-        },
-      });
-      paymentElement.mount(paymentElementWrapper);
-
-      checkout.on('change', (session) => {
-        summary.renderStripeSession(session);
-      });
-
-      state.actions = actionsResult.actions;
-      state.checkout = checkout;
-      state.checkoutSessionId = result.checkout_session_id;
-      state.confirmationToken = result.confirmation_token;
-      state.paymentElement = paymentElement;
-      state.shippingOptions = result.shipping_options;
-
-      await selectStripeShippingOption(methodName);
-      summary.renderCanonicalItems(result.items);
-      summary.renderPreparedCheckout(result);
-      setPayButton('Place Order', false);
-    })();
-
-    try {
-      await state.preparingPromise;
-    } catch (error) {
-      console.error('Checkout preparation failed:', error);
-      showError(error.message || 'Payment could not be prepared.');
-      setPayButton('Payment Unavailable', true);
-    } finally {
-      state.preparingPromise = null;
-    }
+    });
   }
 
   initialiseCheckoutAddress(root);
 
-  const shipping = createCheckoutShipping(root, prepareCheckout);
+  shipping = createCheckoutShipping(root, prepareCheckout);
+  discountController = createCheckoutDiscount(root, {
+    onApply: (code) => replaceDiscount(code),
+    onRemove: () => replaceDiscount('', { announceRemoval: true }),
+  });
 
   payButton.addEventListener('click', async (event) => {
     event.preventDefault();
 
-    if (state.payDisabled) return;
+    if (state.payDisabled || state.preparingPromise || state.confirming) return;
 
     showError('');
 
@@ -243,6 +380,8 @@ export async function initCheckout() {
       return;
     }
 
+    state.confirming = true;
+    setCheckoutControlsBusy(true);
     setPayButton('Processing...', true);
 
     try {
@@ -274,6 +413,8 @@ export async function initCheckout() {
     } catch (error) {
       console.error('Checkout confirmation failed:', error);
       showError(error.message || 'Payment failed.');
+      state.confirming = false;
+      setCheckoutControlsBusy(false);
       setPayButton('Place Order', false);
     }
   });

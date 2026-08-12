@@ -91,7 +91,7 @@ export async function authorizeCheckoutAccess(
   const { data: checkoutIntent, error } = await supabase
     .from('checkout_intents')
     .select(
-      'id, user_id, confirmation_token_hash, confirmation_token_expires_at, status, shipping_name, shipping_phone, shipping_address, billing_name, billing_address, billing_is_different'
+      'id, user_id, confirmation_token_hash, confirmation_token_expires_at, status, shipping_name, shipping_phone, shipping_address, billing_name, billing_address, billing_is_different, stripe_coupon_id'
     )
     .eq('stripe_checkout_session_id', checkoutSessionId)
     .maybeSingle();

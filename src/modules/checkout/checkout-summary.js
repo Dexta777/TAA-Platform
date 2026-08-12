@@ -18,10 +18,55 @@ function removeGeneratedItems(wrapper) {
   });
 }
 
+export function getCheckoutDiscountDisplay(discount, shippingOption = null) {
+  if (!discount || typeof discount !== 'object') {
+    return Object.freeze({ visible: false, amount: 0, code: '', label: 'Discount' });
+  }
+
+  const code = String(discount.code ?? '').trim();
+  const isFreeShipping = discount.type === 'free_shipping';
+  const amount = isFreeShipping
+    ? Number(shippingOption?.original_shipping ?? discount.shipping_discount_amount ?? 0)
+    : Number(discount.discount_amount ?? 0);
+
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return Object.freeze({
+      visible: false,
+      amount: 0,
+      code,
+      label: isFreeShipping ? 'Shipping discount' : 'Discount',
+    });
+  }
+
+  return Object.freeze({
+    visible: true,
+    amount,
+    code,
+    label: isFreeShipping ? 'Shipping discount' : 'Discount',
+  });
+}
+
 export function createCheckoutSummary(root) {
   const subtotalElement = root.querySelector('[data-checkout-subtotal]');
   const shippingElement = root.querySelector('[data-checkout-shipping]');
   const totalElement = root.querySelector('[data-checkout-total]');
+  const discountRow = root.querySelector('[data-checkout-discount-row]');
+  const discountCodeElement = root.querySelector('[data-checkout-discount-code]');
+  const discountAmountElement = root.querySelector('[data-checkout-discount]');
+  const discountLabelElement = root.querySelector('[data-checkout-discount-label]');
+
+  function renderDiscount(discount, shippingOption, currency = 'GBP') {
+    const display = getCheckoutDiscountDisplay(discount, shippingOption);
+
+    if (discountRow) discountRow.style.display = display.visible ? '' : 'none';
+    if (discountCodeElement) discountCodeElement.textContent = display.code;
+    if (discountLabelElement) discountLabelElement.textContent = display.label;
+    if (discountAmountElement) {
+      discountAmountElement.textContent = display.visible
+        ? `-${formatMoneyFromPence(display.amount, currency)}`
+        : '';
+    }
+  }
 
   function renderItems(cart) {
     const wrapper = root.querySelector('[data-order-summary-items="true"]');
@@ -88,22 +133,37 @@ export function createCheckoutSummary(root) {
     if (totalElement) {
       totalElement.textContent = formatMoneyFromPence(result.subtotal, result.currency);
     }
+
+    renderDiscount(null, null, result.currency);
   }
 
-  function renderPreparedCheckout(result) {
+  function renderPreparedCheckout(result, shippingOption = null) {
+    const discountDisplay = getCheckoutDiscountDisplay(result.discount || null, shippingOption);
+    const shippingAmount =
+      result.discount?.type === 'free_shipping' && discountDisplay.visible
+        ? discountDisplay.amount
+        : result.shipping;
+
     if (subtotalElement) {
       subtotalElement.textContent = formatMoneyFromPence(result.subtotal, result.currency);
     }
     if (shippingElement) {
-      shippingElement.textContent = formatMoneyFromPence(result.shipping, result.currency);
+      shippingElement.textContent = formatMoneyFromPence(shippingAmount, result.currency);
     }
     if (totalElement) {
       totalElement.textContent = formatMoneyFromPence(result.total, result.currency);
     }
+
+    renderDiscount(result.discount || null, shippingOption, result.currency);
   }
 
-  function renderStripeSession(session) {
+  function renderStripeSession(session, discount = null, shippingOption = null) {
     const currency = session.currency || 'GBP';
+    const discountDisplay = getCheckoutDiscountDisplay(discount, shippingOption);
+    const shippingAmount =
+      discount?.type === 'free_shipping' && discountDisplay.visible
+        ? discountDisplay.amount
+        : session.total.shippingRate.minorUnitsAmount;
 
     if (subtotalElement) {
       subtotalElement.textContent = formatMoneyFromPence(
@@ -112,10 +172,7 @@ export function createCheckoutSummary(root) {
       );
     }
     if (shippingElement) {
-      shippingElement.textContent = formatMoneyFromPence(
-        session.total.shippingRate.minorUnitsAmount,
-        currency
-      );
+      shippingElement.textContent = formatMoneyFromPence(shippingAmount, currency);
     }
     if (totalElement) {
       totalElement.textContent = formatMoneyFromPence(
@@ -123,7 +180,11 @@ export function createCheckoutSummary(root) {
         currency
       );
     }
+
+    renderDiscount(discount, shippingOption, currency);
   }
+
+  renderDiscount(null);
 
   return Object.freeze({
     renderCanonicalItems,
@@ -131,5 +192,6 @@ export function createCheckoutSummary(root) {
     renderPreparedCheckout,
     renderShippingOptionsResult,
     renderStripeSession,
+    renderDiscount,
   });
 }

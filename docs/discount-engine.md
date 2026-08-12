@@ -89,7 +89,37 @@ consume a redemption. Replay returns the existing order without decrementing inv
 a second redemption. Nullable fingerprints remain acceptable for unrestricted discounts when the
 secondary fingerprint infrastructure is degraded.
 
-This Slice intentionally does not connect a browser discount field. Limited-redemption and
-first-time-buyer codes remain production-blocked: paid-order redemption persistence is not an
-entitlement reservation, so simultaneous eligible Sessions can still race. Reservation and
-compensation must be implemented before those codes are enabled.
+## Customer application and Session replacement
+
+The checkout UI may submit only a normalized human-entered code. Safe evaluator categories are
+translated into customer messages; internal identity and redemption reasons never reach the
+browser. If the discount controls are absent, checkout continues without discount UI.
+
+Stripe Checkout Sessions are immutable for TAA discount changes. Applying or removing a code after
+checkout preparation therefore uses an authorized replacement handoff:
+
+1. Authorize the pending previous checkout by its account ownership or confirmation capability.
+2. Resolve and evaluate the proposed checkout without changing the previous Session.
+3. Create, verify, and persist the replacement Session, intent, and items completely.
+4. Expire or safely confirm expiry of the previous Stripe Session.
+5. Mark its intent expired and clean its temporary coupon best-effort.
+6. Return the replacement so the browser can install the new Checkout SDK and Payment Element.
+
+Invalid discounts leave the existing checkout untouched. If the previous Session cannot be proven
+invalidated, the new Session is compensated and is never returned as a second payable path. The
+browser restores the previous payment path only when Stripe confirms it remains open/unpaid and
+compensation of the new Session is also confirmed; ambiguous compensation disables payment and
+raises a high-severity diagnostic. The
+browser retains the old confirmation capability until the replacement Payment Element is installed,
+destroys the supported old Payment Element during the swap, and ignores stale Checkout change
+events using a generation guard.
+
+Percentage and fixed discounts remain attached while Stripe updates shipping within the same
+Session. For free shipping, every Stripe rate remains zero while the browser displays the selected
+method's original server-provided amount and an equal shipping-discount row. The paid webhook
+remains the final economics authority.
+
+Limited-redemption and first-time-buyer codes remain production-blocked: paid-order redemption
+persistence and Session replacement are not entitlement reservation, so simultaneous eligible
+Sessions can still race. Reservation and compensation must be implemented before those codes are
+enabled.

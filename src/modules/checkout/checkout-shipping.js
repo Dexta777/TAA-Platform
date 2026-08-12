@@ -17,6 +17,8 @@ function getWrapperName(wrapper) {
 
 export function createCheckoutShipping(root, onSelect) {
   const wrappers = Array.from(root.querySelectorAll('[data-shipping-method-option="true"]'));
+  let currentOptions = [];
+  let busy = false;
 
   function getSelectedMethodName() {
     const selectedRadio = root.querySelector(
@@ -36,30 +38,43 @@ export function createCheckoutShipping(root, onSelect) {
   }
 
   function renderOptions(options) {
+    currentOptions = Array.isArray(options) ? options : [];
+
     wrappers.forEach((wrapper) => {
       const methodName = getWrapperName(wrapper);
-      const option = options.find(
+      const option = currentOptions.find(
         (candidate) => normalizeMethodName(candidate.name) === normalizeMethodName(methodName)
       );
       const radio = wrapper.querySelector('input[type="radio"]');
       const priceElement = wrapper.querySelector('[data-shipping-method-price]');
 
-      if (radio) radio.disabled = !option;
+      if (radio) radio.disabled = busy || !option;
       if (priceElement && option) {
-        priceElement.textContent = formatMoneyFromPence(option.shipping, option.currency);
+        priceElement.textContent = formatMoneyFromPence(
+          option.original_shipping ?? option.shipping,
+          option.currency
+        );
       }
     });
 
     root.querySelectorAll('[data-shipping-method-price]').forEach((priceElement) => {
       const methodName = priceElement.getAttribute('data-shipping-method-price');
-      const option = options.find(
+      const option = currentOptions.find(
         (candidate) => normalizeMethodName(candidate.name) === normalizeMethodName(methodName)
       );
 
       if (option) {
-        priceElement.textContent = formatMoneyFromPence(option.shipping, option.currency);
+        priceElement.textContent = formatMoneyFromPence(
+          option.original_shipping ?? option.shipping,
+          option.currency
+        );
       }
     });
+  }
+
+  function setBusy(nextBusy) {
+    busy = Boolean(nextBusy);
+    renderOptions(currentOptions);
   }
 
   wrappers.forEach((wrapper) => {
@@ -85,5 +100,5 @@ export function createCheckoutShipping(root, onSelect) {
 
   renderSelection();
 
-  return Object.freeze({ getSelectedMethodName, renderOptions, renderSelection });
+  return Object.freeze({ getSelectedMethodName, renderOptions, renderSelection, setBusy });
 }
