@@ -26,6 +26,7 @@ import {
 import {
   CheckoutReplacementConflictError,
   completeCheckoutReplacement,
+  provePreviousCheckoutIntentExpired,
   validateReplacementAccess,
 } from '../_shared/checkout-replacement.ts';
 
@@ -624,7 +625,12 @@ serve(async (request) => {
 
       await completeCheckoutReplacement({
         expirePreviousCheckout: async () => {
-          await stripe.checkout.sessions.expire(replaceCheckoutSessionId);
+          const previousSession = await stripe.checkout.sessions.expire(replaceCheckoutSessionId);
+
+          return {
+            status: previousSession.status,
+            payment_status: previousSession.payment_status,
+          };
         },
         retrievePreviousCheckout: async () => {
           const previousSession = await stripe.checkout.sessions.retrieve(replaceCheckoutSessionId);
@@ -642,13 +648,36 @@ serve(async (request) => {
           });
         },
         markPreviousCheckoutExpired: async () => {
-          const { error } = await supabase
-            .from('checkout_intents')
-            .update({ status: 'expired' })
-            .eq('id', previousCheckoutIntent.id)
-            .eq('status', 'pending');
+          await provePreviousCheckoutIntentExpired({
+            transitionPreviousCheckoutToExpired: async () => {
+              const { data, error } = await supabase
+                .from('checkout_intents')
+                .update({
+                  status: 'expired',
+                  confirmation_token_hash: null,
+                  confirmation_token_expires_at: null,
+                })
+                .eq('id', previousCheckoutIntent.id)
+                .eq('status', 'pending')
+                .select('status')
+                .maybeSingle();
 
-          if (error) throw new Error('Previous checkout intent status update failed.');
+              if (error) throw new Error('Previous checkout intent status update failed.');
+
+              return data?.status || null;
+            },
+            retrievePreviousCheckoutIntentStatus: async () => {
+              const { data, error } = await supabase
+                .from('checkout_intents')
+                .select('status')
+                .eq('id', previousCheckoutIntent.id)
+                .maybeSingle();
+
+              if (error) throw new Error('Previous checkout intent status lookup failed.');
+
+              return data?.status || null;
+            },
+          });
         },
         cleanupPreviousCoupon: async () => {
           await deleteTemporaryCouponBestEffort(
@@ -656,8 +685,8 @@ serve(async (request) => {
             'checkout_replacement'
           );
         },
-        reportNonFatalFailure: (context) => {
-          console.error('CHECKOUT REPLACEMENT NON-FATAL CLEANUP FAILURE:', {
+        reportFailure: (context) => {
+          console.error('CHECKOUT REPLACEMENT FOLLOW-UP FAILURE:', {
             context,
             previous_checkout_intent_id: previousCheckoutIntent.id,
           });

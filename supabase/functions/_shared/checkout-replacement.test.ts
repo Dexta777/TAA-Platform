@@ -1,6 +1,7 @@
 import {
   CheckoutReplacementConflictError,
   completeCheckoutReplacement,
+  provePreviousCheckoutIntentExpired,
   validateReplacementAccess,
 } from './checkout-replacement.ts';
 
@@ -8,6 +9,19 @@ function assertEquals(actual: unknown, expected: unknown) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(`Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}.`);
   }
+}
+
+async function assertReplacementConflict(callback: () => Promise<void>, expectedCode: string) {
+  try {
+    await callback();
+  } catch (error) {
+    if (!(error instanceof CheckoutReplacementConflictError)) throw error;
+
+    assertEquals(error.publicCode, expectedCode);
+    return;
+  }
+
+  throw new Error('Expected replacement conflict.');
 }
 
 Deno.test('replacement access requires ownership or a valid capability', () => {
@@ -62,6 +76,7 @@ Deno.test('successful replacement invalidates the old checkout after new prepara
   await completeCheckoutReplacement({
     expirePreviousCheckout: async () => {
       calls.push('old_checkout_expired');
+      return { status: 'expired', payment_status: 'unpaid' };
     },
     retrievePreviousCheckout: async () => {
       throw new Error('retrieval should not be required');
@@ -76,7 +91,7 @@ Deno.test('successful replacement invalidates the old checkout after new prepara
     cleanupPreviousCoupon: async () => {
       calls.push('old_coupon_cleaned');
     },
-    reportNonFatalFailure: () => {},
+    reportFailure: () => {},
   });
 
   assertEquals(calls, [
@@ -100,15 +115,199 @@ Deno.test('an already expired unpaid checkout permits replacement to continue', 
       return true;
     },
     markPreviousCheckoutExpired: async () => {
-      calls.push('old_intent_expired');
+      await provePreviousCheckoutIntentExpired({
+        transitionPreviousCheckoutToExpired: async () => {
+          calls.push('old_intent_transition_attempted');
+          return null;
+        },
+        retrievePreviousCheckoutIntentStatus: async () => {
+          calls.push('old_intent_expired_proven');
+          return 'expired';
+        },
+      });
     },
     cleanupPreviousCoupon: async () => {
       calls.push('old_coupon_cleaned');
     },
-    reportNonFatalFailure: () => {},
+    reportFailure: () => {},
   });
 
-  assertEquals(calls, ['old_intent_expired', 'old_coupon_cleaned']);
+  assertEquals(calls, [
+    'old_intent_transition_attempted',
+    'old_intent_expired_proven',
+    'old_coupon_cleaned',
+  ]);
+});
+
+Deno.test(
+  'database status update failure compensates the new checkout and fails closed',
+  async () => {
+    const calls: string[] = [];
+
+    await assertReplacementConflict(
+      () =>
+        completeCheckoutReplacement({
+          expirePreviousCheckout: async () => {
+            calls.push('old_checkout_expired');
+            return { status: 'expired', payment_status: 'unpaid' };
+          },
+          retrievePreviousCheckout: async () => {
+            throw new Error('retrieval should not be required');
+          },
+          compensateNewCheckout: async () => {
+            calls.push('new_checkout_compensated');
+            return true;
+          },
+          markPreviousCheckoutExpired: async () => {
+            calls.push('old_intent_status_failed');
+            throw new Error('status unavailable');
+          },
+          cleanupPreviousCoupon: async () => {
+            calls.push('old_coupon_cleaned');
+          },
+          reportFailure: (context) => {
+            calls.push(context);
+          },
+        }),
+      'previous_checkout_unavailable'
+    );
+
+    assertEquals(calls, [
+      'old_checkout_expired',
+      'old_intent_status_failed',
+      'previous_checkout_status_proof',
+      'new_checkout_compensated',
+    ]);
+  }
+);
+
+Deno.test(
+  'zero-row database transition with paid status compensates and fails closed',
+  async () => {
+    const calls: string[] = [];
+
+    await assertReplacementConflict(
+      () =>
+        completeCheckoutReplacement({
+          expirePreviousCheckout: async () => ({ status: 'expired', payment_status: 'unpaid' }),
+          retrievePreviousCheckout: async () => {
+            throw new Error('retrieval should not be required');
+          },
+          compensateNewCheckout: async () => {
+            calls.push('new_checkout_compensated');
+            return true;
+          },
+          markPreviousCheckoutExpired: async () => {
+            await provePreviousCheckoutIntentExpired({
+              transitionPreviousCheckoutToExpired: async () => null,
+              retrievePreviousCheckoutIntentStatus: async () => 'paid',
+            });
+          },
+          cleanupPreviousCoupon: async () => {
+            calls.push('old_coupon_cleaned');
+          },
+          reportFailure: (context) => {
+            calls.push(context);
+          },
+        }),
+      'previous_checkout_unavailable'
+    );
+
+    assertEquals(calls, ['previous_checkout_status_proof', 'new_checkout_compensated']);
+  }
+);
+
+Deno.test('zero-row database transition with expired status continues idempotently', async () => {
+  const calls: string[] = [];
+
+  await completeCheckoutReplacement({
+    expirePreviousCheckout: async () => ({ status: 'expired', payment_status: 'unpaid' }),
+    retrievePreviousCheckout: async () => {
+      throw new Error('retrieval should not be required');
+    },
+    compensateNewCheckout: async () => {
+      calls.push('new_checkout_compensated');
+      return true;
+    },
+    markPreviousCheckoutExpired: async () => {
+      await provePreviousCheckoutIntentExpired({
+        transitionPreviousCheckoutToExpired: async () => null,
+        retrievePreviousCheckoutIntentStatus: async () => 'expired',
+      });
+      calls.push('old_intent_expired_proven');
+    },
+    cleanupPreviousCoupon: async () => {
+      calls.push('old_coupon_cleaned');
+    },
+    reportFailure: () => {},
+  });
+
+  assertEquals(calls, ['old_intent_expired_proven', 'old_coupon_cleaned']);
+});
+
+Deno.test('unconfirmed compensation after database status failure still fails closed', async () => {
+  const calls: string[] = [];
+
+  await assertReplacementConflict(
+    () =>
+      completeCheckoutReplacement({
+        expirePreviousCheckout: async () => ({ status: 'expired', payment_status: 'unpaid' }),
+        retrievePreviousCheckout: async () => {
+          throw new Error('retrieval should not be required');
+        },
+        compensateNewCheckout: async () => {
+          calls.push('new_checkout_compensation_unconfirmed');
+          return false;
+        },
+        markPreviousCheckoutExpired: async () => {
+          throw new Error('status unavailable');
+        },
+        cleanupPreviousCoupon: async () => {
+          calls.push('old_coupon_cleaned');
+        },
+        reportFailure: (context) => {
+          calls.push(context);
+        },
+      }),
+    'previous_checkout_unavailable'
+  );
+
+  assertEquals(calls, ['previous_checkout_status_proof', 'new_checkout_compensation_unconfirmed']);
+});
+
+Deno.test('coupon cleanup remains non-fatal after Stripe and database terminal state', async () => {
+  const calls: string[] = [];
+
+  await completeCheckoutReplacement({
+    expirePreviousCheckout: async () => {
+      calls.push('old_checkout_expired');
+      return { status: 'expired', payment_status: 'unpaid' };
+    },
+    retrievePreviousCheckout: async () => {
+      throw new Error('retrieval should not be required');
+    },
+    compensateNewCheckout: async () => {
+      calls.push('new_checkout_compensated');
+      return true;
+    },
+    markPreviousCheckoutExpired: async () => {
+      calls.push('old_intent_expired');
+    },
+    cleanupPreviousCoupon: async () => {
+      calls.push('old_coupon_cleanup_failed');
+      throw new Error('coupon cleanup failed');
+    },
+    reportFailure: (context) => {
+      calls.push(context);
+    },
+  });
+
+  assertEquals(calls, [
+    'old_checkout_expired',
+    'old_intent_expired',
+    'old_coupon_cleanup_failed',
+    'previous_coupon_cleanup',
+  ]);
 });
 
 Deno.test(
@@ -128,7 +327,7 @@ Deno.test(
         },
         markPreviousCheckoutExpired: async () => {},
         cleanupPreviousCoupon: async () => {},
-        reportNonFatalFailure: () => {},
+        reportFailure: () => {},
       });
 
       throw new Error('Expected replacement conflict.');
@@ -159,7 +358,7 @@ Deno.test(
         },
         markPreviousCheckoutExpired: async () => {},
         cleanupPreviousCoupon: async () => {},
-        reportNonFatalFailure: () => {},
+        reportFailure: () => {},
       });
 
       throw new Error('Expected replacement conflict.');
@@ -185,7 +384,7 @@ Deno.test(
         compensateNewCheckout: async () => false,
         markPreviousCheckoutExpired: async () => {},
         cleanupPreviousCoupon: async () => {},
-        reportNonFatalFailure: () => {},
+        reportFailure: () => {},
       });
 
       throw new Error('Expected replacement conflict.');
