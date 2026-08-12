@@ -2,7 +2,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(47);
+SELECT plan(53);
 
 SELECT col_not_null(
   'public',
@@ -324,6 +324,31 @@ SELECT ok(
   'available-to-sell subtracts held product reservations from on-hand stock'
 );
 
+ALTER TABLE public.products DISABLE TRIGGER sync_klaviyo_products_after_change;
+
+UPDATE public.products
+SET inventory_quantity = 1
+WHERE id = '31000000-0000-0000-0000-000000000001';
+
+SELECT ok(
+  (
+    SELECT on_hand_quantity = 1
+      AND reserved_quantity = 2
+      AND available_to_sell = -1
+    FROM public.get_inventory_available_to_sell(
+      '31000000-0000-0000-0000-000000000001',
+      NULL
+    )
+  ),
+  'negative available-to-sell remains an unclamped inventory integrity signal'
+);
+
+UPDATE public.products
+SET inventory_quantity = 5
+WHERE id = '31000000-0000-0000-0000-000000000001';
+
+ALTER TABLE public.products ENABLE TRIGGER sync_klaviyo_products_after_change;
+
 SELECT lives_ok(
   $$
     SELECT *
@@ -533,6 +558,90 @@ SELECT is(
   ),
   5,
   'release does not mutate physical inventory'
+);
+
+UPDATE public.checkout_attempts
+SET
+  status = 'expired',
+  capability_expires_at = clock_timestamp() - interval '1 hour',
+  hard_expires_at = clock_timestamp() - interval '1 hour',
+  created_at = clock_timestamp() - interval '2 hours',
+  updated_at = clock_timestamp(),
+  completed_at = clock_timestamp()
+WHERE id = '41000000-0000-0000-0000-000000000001';
+
+SELECT is(
+  (
+    SELECT request_replayed AND reservation_status = 'released'
+    FROM public.reserve_checkout_inventory(
+      '41000000-0000-0000-0000-000000000001',
+      '61000000-0000-0000-0000-000000000001',
+      '51000000-0000-0000-0000-000000000001',
+      repeat('1', 64),
+      clock_timestamp() + interval '29 minutes'
+    )
+  ),
+  true,
+  'an exact request replays without changing its terminal reservation state'
+);
+
+SELECT ok(
+  (
+    SELECT count(*) = 1
+    FROM public.inventory_reservations
+    WHERE checkout_attempt_id = '41000000-0000-0000-0000-000000000001'
+  )
+  AND (
+    SELECT count(*) = 1
+    FROM public.inventory_reservation_items AS items
+    JOIN public.inventory_reservations AS reservations
+      ON reservations.id = items.reservation_id
+    WHERE reservations.checkout_attempt_id = '41000000-0000-0000-0000-000000000001'
+  ),
+  'terminal replay creates no additional reservation header or item'
+);
+
+SELECT is(
+  (
+    SELECT inventory_quantity
+    FROM public.products
+    WHERE id = '31000000-0000-0000-0000-000000000001'
+  ),
+  5,
+  'terminal replay does not mutate physical inventory'
+);
+
+SELECT throws_ok(
+  $$
+    SELECT *
+    FROM public.reserve_checkout_inventory(
+      '41000000-0000-0000-0000-000000000001',
+      '61000000-0000-0000-0000-000000000009',
+      '51000000-0000-0000-0000-000000000005',
+      repeat('5', 64),
+      clock_timestamp() + interval '29 minutes',
+      '51000000-0000-0000-0000-000000000004'
+    )
+  $$,
+  'P0001',
+  'Checkout attempt is no longer active.',
+  'a terminal attempt rejects a new checkout request ID'
+);
+
+SELECT throws_ok(
+  $$
+    SELECT *
+    FROM public.reserve_checkout_inventory(
+      '41000000-0000-0000-0000-000000000001',
+      '61000000-0000-0000-0000-000000000001',
+      '51000000-0000-0000-0000-000000000001',
+      repeat('f', 64),
+      clock_timestamp() + interval '29 minutes'
+    )
+  $$,
+  'P0001',
+  'Checkout request conflict.',
+  'terminal replay still rejects a changed command fingerprint'
 );
 
 SELECT lives_ok(

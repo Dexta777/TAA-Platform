@@ -444,12 +444,6 @@ BEGIN
     RAISE EXCEPTION 'Checkout command fingerprint must be lowercase SHA-256 hex.';
   END IF;
 
-  IF p_expires_at IS NULL
-    OR p_expires_at <= v_now
-    OR p_expires_at > v_now + interval '30 minutes' THEN
-    RAISE EXCEPTION 'Reservation expiry must be within the next 30 minutes.';
-  END IF;
-
   SELECT attempts.*
   INTO v_attempt
   FROM public.checkout_attempts AS attempts
@@ -458,14 +452,6 @@ BEGIN
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Checkout attempt not found.';
-  END IF;
-
-  IF v_attempt.status <> 'active' OR v_attempt.hard_expires_at <= v_now THEN
-    RAISE EXCEPTION 'Checkout attempt is no longer active.';
-  END IF;
-
-  IF p_expires_at > v_attempt.hard_expires_at THEN
-    RAISE EXCEPTION 'Reservation expiry exceeds the checkout attempt lifetime.';
   END IF;
 
   SELECT checkout_intents.*
@@ -508,6 +494,20 @@ BEGIN
       true,
       true;
     RETURN;
+  END IF;
+
+  IF v_attempt.status <> 'active' OR v_attempt.hard_expires_at <= v_now THEN
+    RAISE EXCEPTION 'Checkout attempt is no longer active.';
+  END IF;
+
+  IF p_expires_at IS NULL
+    OR p_expires_at <= v_now
+    OR p_expires_at > v_now + interval '30 minutes' THEN
+    RAISE EXCEPTION 'Reservation expiry must be within the next 30 minutes.';
+  END IF;
+
+  IF p_expires_at > v_attempt.hard_expires_at THEN
+    RAISE EXCEPTION 'Reservation expiry exceeds the checkout attempt lifetime.';
   END IF;
 
   SELECT checkout_intents.*

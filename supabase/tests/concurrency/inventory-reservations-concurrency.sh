@@ -6,6 +6,9 @@ database_container="${SUPABASE_DB_CONTAINER:-supabase_db_TAA-Platform}"
 test_directory="$(mktemp -d "${TMPDIR:-/tmp}/taa-inventory-concurrency.XXXXXX")"
 first_output="${test_directory}/first.log"
 second_output="${test_directory}/second.log"
+first_input="${test_directory}/first.sql.fifo"
+first_pid=''
+second_pid=''
 psql_command=(
   docker exec -i "${database_container}"
   psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres
@@ -37,8 +40,20 @@ SQL
 }
 
 cleanup() {
+  exec 3>&- || true
+
+  if [[ -n "${first_pid}" ]] && kill -0 "${first_pid}" 2>/dev/null; then
+    kill "${first_pid}" 2>/dev/null || true
+    wait "${first_pid}" 2>/dev/null || true
+  fi
+
+  if [[ -n "${second_pid}" ]] && kill -0 "${second_pid}" 2>/dev/null; then
+    kill "${second_pid}" 2>/dev/null || true
+    wait "${second_pid}" 2>/dev/null || true
+  fi
+
   cleanup_fixtures
-  rm -f "${first_output}" "${second_output}"
+  rm -f "${first_output}" "${second_output}" "${first_input}"
   rmdir "${test_directory}"
 }
 
@@ -138,78 +153,102 @@ VALUES
   );
 SQL
 
-run_reservation() {
-  local attempt_id="$1"
-  local request_id="$2"
-  local intent_id="$3"
-  local fingerprint_character="$4"
-  local output_file="$5"
+wait_for_database_condition() {
+  local condition_sql="$1"
+  local failure_message="$2"
+  local attempts=100
 
-  "${psql_command[@]}" >"${output_file}" 2>&1 <<SQL
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    if [[ "$("${psql_command[@]}" -Atc "${condition_sql}")" == '1' ]]; then
+      return 0
+    fi
+
+    sleep 0.1
+  done
+
+  echo "${failure_message}" >&2
+  return 1
+}
+
+mkfifo "${first_input}"
+exec 3<>"${first_input}"
+
+"${psql_command[@]}" <"${first_input}" >"${first_output}" 2>&1 &
+first_pid=$!
+
+printf '%s\n' "
 BEGIN;
-SELECT pg_sleep(1);
+SET application_name = 'taa_inventory_concurrency_a';
 SELECT *
 FROM public.reserve_checkout_inventory(
-  '${attempt_id}',
-  '${request_id}',
-  '${intent_id}',
-  repeat('${fingerprint_character}', 64),
+  '81000000-0000-0000-0000-000000000001',
+  '83000000-0000-0000-0000-000000000001',
+  '82000000-0000-0000-0000-000000000001',
+  repeat('1', 64),
+  clock_timestamp() + interval '29 minutes'
+);
+" >&3
+
+wait_for_database_condition \
+  "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'taa_inventory_concurrency_a' AND state = 'idle in transaction' AND xact_start IS NOT NULL;" \
+  'Connection A did not complete its reservation while remaining uncommitted.'
+
+echo 'PASS: connection A reserved the final unit and is idle in an open, uncommitted transaction.'
+
+"${psql_command[@]}" >"${second_output}" 2>&1 <<'SQL' &
+BEGIN;
+SET application_name = 'taa_inventory_concurrency_b';
+SELECT *
+FROM public.reserve_checkout_inventory(
+  '81000000-0000-0000-0000-000000000002',
+  '83000000-0000-0000-0000-000000000002',
+  '82000000-0000-0000-0000-000000000002',
+  repeat('2', 64),
   clock_timestamp() + interval '29 minutes'
 );
 COMMIT;
 SQL
-}
-
-run_reservation \
-  '81000000-0000-0000-0000-000000000001' \
-  '83000000-0000-0000-0000-000000000001' \
-  '82000000-0000-0000-0000-000000000001' \
-  '1' \
-  "${first_output}" &
-first_pid=$!
-
-run_reservation \
-  '81000000-0000-0000-0000-000000000002' \
-  '83000000-0000-0000-0000-000000000002' \
-  '82000000-0000-0000-0000-000000000002' \
-  '2' \
-  "${second_output}" &
 second_pid=$!
 
-set +e
-wait "${first_pid}"
-first_status=$?
-wait "${second_pid}"
-second_status=$?
-set -e
+wait_for_database_condition \
+  "SELECT count(*) FROM pg_stat_activity AS blocked JOIN pg_stat_activity AS blocker ON blocker.pid = ANY(pg_blocking_pids(blocked.pid)) WHERE blocked.application_name = 'taa_inventory_concurrency_b' AND blocker.application_name = 'taa_inventory_concurrency_a' AND blocked.wait_event_type = 'Lock' AND blocked.query LIKE '%reserve_checkout_inventory%';" \
+  'Connection B was not observed waiting on connection A during inventory reservation.'
 
-success_count=0
-failure_output=""
-
-if [[ ${first_status} -eq 0 ]]; then
-  success_count=$((success_count + 1))
-else
-  failure_output="${first_output}"
-fi
-
-if [[ ${second_status} -eq 0 ]]; then
-  success_count=$((success_count + 1))
-else
-  failure_output="${second_output}"
-fi
-
-if [[ ${success_count} -ne 1 ]]; then
-  echo "Expected exactly one successful reservation; observed ${success_count}." >&2
-  echo "First connection output:" >&2
-  sed 's/^/  /' "${first_output}" >&2
-  echo "Second connection output:" >&2
+if ! kill -0 "${second_pid}" 2>/dev/null; then
+  echo 'Connection B completed before connection A committed.' >&2
   sed 's/^/  /' "${second_output}" >&2
   exit 1
 fi
 
-if ! grep -q 'Insufficient available inventory for SKU CONCURRENCY-RESERVATION-PRODUCT.' "${failure_output}"; then
-  echo 'The losing connection did not fail for insufficient available inventory.' >&2
-  sed 's/^/  /' "${failure_output}" >&2
+echo 'PASS: connection B is blocked on connection A while A holds the catalogue row lock uncommitted.'
+
+printf '%s\n' 'COMMIT;' '\q' >&3
+exec 3>&-
+
+set +e
+wait "${first_pid}"
+first_status=$?
+first_pid=''
+wait "${second_pid}"
+second_status=$?
+second_pid=''
+set -e
+
+if [[ ${first_status} -ne 0 ]]; then
+  echo 'Connection A failed instead of committing its reservation.' >&2
+  sed 's/^/  /' "${first_output}" >&2
+  exit 1
+fi
+
+if [[ ${second_status} -eq 0 ]]; then
+  echo 'Connection B unexpectedly reserved inventory after connection A committed.' >&2
+  sed 's/^/  /' "${second_output}" >&2
+  exit 1
+fi
+
+if ! grep -q 'Insufficient available inventory for SKU CONCURRENCY-RESERVATION-PRODUCT.' "${second_output}"; then
+  echo 'Connection B did not fail for insufficient available inventory after A committed.' >&2
+  sed 's/^/  /' "${second_output}" >&2
   exit 1
 fi
 
@@ -241,5 +280,5 @@ if [[ "${final_state}" != '1|1|0|1' ]]; then
   exit 1
 fi
 
-echo 'PASS: two independent connections produced one reservation and one insufficient-availability failure.'
+echo 'PASS: after connection A committed, connection B resumed and failed for insufficient availability.'
 echo 'PASS: on-hand=1, reserved=1, available-to-sell=0, held-reservations=1.'
