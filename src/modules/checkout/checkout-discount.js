@@ -71,11 +71,21 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     );
   }
 
+  function setUiHidden(element, hidden) {
+    if (!element) return;
+
+    if (hidden) {
+      element.setAttribute('data-ui-hidden', 'true');
+    } else {
+      element.removeAttribute('data-ui-hidden');
+    }
+  }
+
   function hideMessage(element) {
     if (!element) return;
 
     element.textContent = '';
-    element.hidden = true;
+    setUiHidden(element, true);
   }
 
   function clearMessages() {
@@ -92,7 +102,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     if (!successElement) return;
 
     successElement.textContent = message;
-    successElement.hidden = false;
+    setUiHidden(successElement, false);
   }
 
   function showErrorMessage(message) {
@@ -101,7 +111,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
     hideMessage(successElement);
 
     errorElement.textContent = message;
-    errorElement.hidden = false;
+    setUiHidden(errorElement, false);
   }
 
   function setControlBusy(control) {
@@ -142,7 +152,7 @@ export function createCheckoutDiscount(root, { onApply, onRemove }) {
 
       row.removeAttribute('data-applied-discount-template');
       row.setAttribute('data-applied-discount-generated', 'true');
-      row.hidden = false;
+      setUiHidden(row, false);
 
       if (codeElement) codeElement.textContent = normalizeDiscountCode(discount.code);
       setControlBusy(removeControl);

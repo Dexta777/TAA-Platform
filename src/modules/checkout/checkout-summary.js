@@ -58,7 +58,13 @@ export function createCheckoutSummary(root) {
   function renderDiscount(discount, shippingOption, currency = 'GBP') {
     const display = getCheckoutDiscountDisplay(discount, shippingOption);
 
-    if (discountRow) discountRow.hidden = !display.visible;
+    if (discountRow) {
+      if (display.visible) {
+        discountRow.removeAttribute('data-ui-hidden');
+      } else {
+        discountRow.setAttribute('data-ui-hidden', 'true');
+      }
+    }
     if (discountCodeElement) discountCodeElement.textContent = display.code;
     if (discountLabelElement) discountLabelElement.textContent = display.label;
     if (discountAmountElement) {
