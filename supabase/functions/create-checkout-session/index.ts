@@ -33,9 +33,11 @@ import {
   buildCheckoutResponse,
   buildStripeCouponParametersV1,
   buildStripeSessionParametersV1,
+  CHECKOUT_PROTOCOL_VERSION,
   CHECKOUT_WORKER_LEASE_RETRY_SECONDS,
   classifyStripeFailure,
   fingerprintCheckoutCommand,
+  getCheckoutProtocolRoute,
   getStripeFailureAction,
   getStripeIdempotencyKeys,
   getStripeSessionActivationAction,
@@ -62,6 +64,7 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Expose-Headers': 'Retry-After',
 };
 
 function requireEnvironment(name: string) {
@@ -118,12 +121,19 @@ class CheckoutReplacementRequestError extends Error {
 class CheckoutProtocolRequestError extends Error {
   status: number;
   code: string;
+  retryAfterSeconds: number | null;
 
-  constructor(message: string, status: number, code: string) {
+  constructor(
+    message: string,
+    status: number,
+    code: string,
+    retryAfterSeconds: number | null = null
+  ) {
     super(message);
     this.name = 'CheckoutProtocolRequestError';
     this.status = status;
     this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -364,6 +374,18 @@ type CheckoutRequestContext = {
   existing_checkout_intent_id: string | null;
   existing_command_fingerprint: string | null;
   existing_orchestration_state: string | null;
+  admission_state: string;
+  bound_user_id: string | null;
+};
+
+type ResumedCheckoutRequest = {
+  resume_state: string;
+  attempt_status: string | null;
+  checkout_intent_id: string | null;
+  checkout_session_id: string | null;
+  orchestration_state: string | null;
+  worker_lease_acquired: boolean;
+  worker_lease_expires_at: string | null;
 };
 
 type PreparedCheckoutRequest = {
@@ -383,6 +405,19 @@ function getRequiredAttemptToken(payload: Record<string, unknown>) {
   }
 
   return token;
+}
+
+function requireResumeOnlyPayload(payload: Record<string, unknown>) {
+  const allowedFields = new Set([
+    'checkout_operation',
+    'checkout_attempt_id',
+    'checkout_request_id',
+    'checkout_attempt_token',
+  ]);
+
+  if (Object.keys(payload).some((field) => !allowedFields.has(field))) {
+    throw new CheckoutInputError('Checkout resume request contains unsupported fields.');
+  }
 }
 
 async function markReconciliationRequired(
@@ -409,6 +444,30 @@ async function failDefinitiveCheckoutRequest(
   });
 }
 
+async function cancelAdmissionBestEffort(
+  checkoutAttemptId: string | null,
+  checkoutRequestId: string | null,
+  currentUserId: string | null,
+  capabilityHash: string | null
+) {
+  if (!checkoutAttemptId || !checkoutRequestId || !capabilityHash) return;
+
+  try {
+    await callCheckoutRpc(supabase, 'cancel_checkout_request_admission_v1', {
+      p_checkout_attempt_id: checkoutAttemptId,
+      p_checkout_request_id: checkoutRequestId,
+      p_current_user_id: currentUserId,
+      p_capability_hash: capabilityHash,
+    });
+  } catch (error) {
+    console.error('CHECKOUT ADMISSION CANCELLATION FAILED:', {
+      checkout_attempt_id: checkoutAttemptId,
+      checkout_request_id: checkoutRequestId,
+      error_name: error instanceof Error ? error.name : 'unknown',
+    });
+  }
+}
+
 async function handleStripeMutationFailure(
   error: unknown,
   checkoutIntentId: string,
@@ -423,7 +482,8 @@ async function handleStripeMutationFailure(
     throw new CheckoutProtocolRequestError(
       'Checkout preparation is still processing. Please retry.',
       503,
-      failureKind === 'retryable' ? 'stripe_rate_limited' : 'stripe_result_ambiguous'
+      failureKind === 'retryable' ? 'stripe_rate_limited' : 'stripe_result_ambiguous',
+      CHECKOUT_WORKER_LEASE_RETRY_SECONDS
     );
   }
 
@@ -728,167 +788,269 @@ async function handleProtocolReplacement(
 }
 
 async function handleReservationCheckout(request: Request, payload: Record<string, unknown>) {
+  let admittedAttemptId: string | null = null;
+  let admittedRequestId: string | null = null;
+  let admittedCapabilityHash: string | null = null;
+  let admittedUserId: string | null = null;
+  let cancellableAdmission = false;
+
   try {
     const authenticatedUser = await getAuthenticatedUser(supabase, request);
     const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
     const checkoutRequestId = normalizeUuid(payload.checkout_request_id, 'Checkout request ID');
     const attemptToken = getRequiredAttemptToken(payload);
     const attemptCapabilityHash = await sha256Hex(attemptToken);
-    const replaceCheckoutSessionId = cleanText(payload.replace_checkout_session_id, 255) || null;
-    const context = await callCheckoutRpc<CheckoutRequestContext>(
-      supabase,
-      'resolve_checkout_request_context',
-      {
-        p_checkout_attempt_id: checkoutAttemptId,
-        p_checkout_request_id: checkoutRequestId,
-        p_user_id: authenticatedUser?.id || null,
-        p_capability_hash: attemptCapabilityHash,
-        p_replace_checkout_session_id: replaceCheckoutSessionId,
-      }
-    );
-
-    if (!context) throw new Error('Checkout request context was not returned.');
-
-    const command = normalizeCheckoutCommand(payload, context.replacement_checkout_intent_id);
-    const commandFingerprint = await fingerprintCheckoutCommand(command);
-
-    if (
-      context.existing_checkout_intent_id &&
-      context.existing_command_fingerprint !== commandFingerprint
-    ) {
-      throw new CheckoutProtocolRequestError(
-        'Checkout request conflicts with its original command.',
-        409,
-        'checkout_request_conflict'
-      );
-    }
-
-    if (context.existing_orchestration_state === 'superseded') {
-      throw new CheckoutProtocolRequestError(
-        'Checkout request has been superseded.',
-        409,
-        'superseded'
-      );
-    }
-
-    if (
-      context.existing_checkout_intent_id &&
-      !['active', 'payment_pending'].includes(context.attempt_status)
-    ) {
-      throw new CheckoutProtocolRequestError(
-        'Checkout attempt can no longer return a payable Session.',
-        409,
-        'checkout_attempt_terminal'
-      );
-    }
-
-    let canonicalSnapshot: Record<string, unknown> | null = null;
-    let canonicalItems: Array<Record<string, unknown>> | null = null;
-    let canonicalShippingOptions: Array<Record<string, unknown>> | null = null;
-
-    if (!context.existing_checkout_intent_id) {
-      if (!command.shipping_method_name) {
-        throw new CheckoutInputError('Please select a shipping method.');
-      }
-
-      const validatedItems = await resolveCanonicalCart(supabase, command.cart);
-      const subtotalAmount = validatedItems.reduce((total, item) => total + item.line_total, 0);
-      const totalWeightGrams = validatedItems.reduce((total, item) => total + item.weight_grams, 0);
-
-      if (totalWeightGrams <= 0) {
-        throw new CheckoutInputError('Basket weight could not be calculated.');
-      }
-
-      const shippingOptions = await getCanonicalShippingOptions(supabase, totalWeightGrams);
-      const selectedShippingOption = shippingOptions.find(
-        (option) => option.name.trim().toLowerCase() === command.shipping_method_name
-      );
-
-      if (!selectedShippingOption) {
-        throw new CheckoutInputError('Selected shipping method is unavailable.');
-      }
-
-      const orderedShippingOptions = [
-        selectedShippingOption,
-        ...shippingOptions.filter((option) => option.id !== selectedShippingOption.id),
-      ];
-      const stripeCustomer = await getStripeCustomer(authenticatedUser?.id);
-      const trustedIdentityEmail = cleanText(authenticatedUser?.email, 320) || null;
-      const discountEvaluation = command.discount_code
-        ? await evaluateSubmittedDiscount({
-            code: command.discount_code,
-            subtotalAmount,
-            shippingAmount: selectedShippingOption.shipping,
-            userId: authenticatedUser?.id || null,
-            trustedEmail: trustedIdentityEmail,
-            phone: command.shipping_phone,
-            shippingAddress: command.shipping_address,
-          })
-        : null;
-      const shippingAmount = discountEvaluation
-        ? discountEvaluation.final_shipping_amount
-        : selectedShippingOption.shipping;
-      const totalAmount = discountEvaluation
-        ? discountEvaluation.total_amount
-        : subtotalAmount + shippingAmount;
-
-      canonicalSnapshot = {
-        customer_email: stripeCustomer.email,
-        subtotal_amount: subtotalAmount,
-        shipping_amount: shippingAmount,
-        total_amount: totalAmount,
-        currency: 'gbp',
-        shipping_method_name: selectedShippingOption.name,
-        shipping_method_id: selectedShippingOption.id,
-        shipping_rate_id: selectedShippingOption.rate_id,
-        total_weight_grams: totalWeightGrams,
-        shipping_name: command.shipping_name,
-        shipping_phone: command.shipping_phone,
-        shipping_address: command.shipping_address,
-        billing_name: command.billing_name,
-        billing_address: command.billing_address,
-        billing_is_different: command.billing_is_different,
-        stripe_customer_id: stripeCustomer.id,
-        create_account_requested: command.create_account_requested,
-        discount_code_id: discountEvaluation?.discount_code_id || null,
-        discount_code: discountEvaluation?.code || null,
-        discount_amount: discountEvaluation?.discount_amount || 0,
-        shipping_discount_amount: discountEvaluation?.shipping_discount_amount || 0,
-        discount_name: discountEvaluation?.name || null,
-        discount_type: discountEvaluation?.discount_type || null,
-        stripe_return_url: CHECKOUT_RETURN_URL,
-      };
-      canonicalItems = validatedItems;
-      canonicalShippingOptions = orderedShippingOptions.map((option) => ({
-        shipping_method_id: option.id,
-        shipping_rate_id: option.rate_id,
-        display_name: option.name,
-        description: option.description,
-        carrier: option.carrier,
-        amount: getStripeShippingAmount(option.shipping, discountEvaluation?.discount_type || null),
-        original_amount: option.shipping,
-        currency: option.currency,
-      }));
-    }
-
+    const checkoutOperation = cleanText(payload.checkout_operation, 20).toLowerCase();
     const workerLeaseId = crypto.randomUUID();
-    const preparation = await callCheckoutRpc<PreparedCheckoutRequest>(
-      supabase,
-      'prepare_checkout_request',
-      {
-        p_checkout_attempt_id: checkoutAttemptId,
-        p_checkout_request_id: checkoutRequestId,
-        p_user_id: authenticatedUser?.id || null,
-        p_capability_hash: attemptCapabilityHash,
-        p_command_fingerprint: commandFingerprint,
-        p_replaces_checkout_intent_id: command.replaces_checkout_intent_id,
-        p_worker_lease_id: workerLeaseId,
-        p_reservation_expires_at: new Date(Date.now() + 29 * 60 * 1000).toISOString(),
-        p_snapshot: canonicalSnapshot,
-        p_items: canonicalItems,
-        p_shipping_options: canonicalShippingOptions,
+    let preparation: PreparedCheckoutRequest | null = null;
+
+    admittedAttemptId = checkoutAttemptId;
+    admittedRequestId = checkoutRequestId;
+    admittedCapabilityHash = attemptCapabilityHash;
+    admittedUserId = authenticatedUser?.id || null;
+
+    if (checkoutOperation === 'resume') {
+      requireResumeOnlyPayload(payload);
+
+      const resumed = await callCheckoutRpc<ResumedCheckoutRequest>(
+        supabase,
+        'resume_checkout_request_v1',
+        {
+          p_checkout_attempt_id: checkoutAttemptId,
+          p_checkout_request_id: checkoutRequestId,
+          p_current_user_id: authenticatedUser?.id || null,
+          p_capability_hash: attemptCapabilityHash,
+          p_worker_lease_id: workerLeaseId,
+        }
+      );
+
+      if (!resumed) throw new Error('Checkout resume state was not returned.');
+
+      if (resumed.resume_state === 'operation_in_progress') {
+        return new Response(
+          JSON.stringify({
+            error: 'Checkout preparation is still processing.',
+            checkout_orchestration_error: 'operation_in_progress',
+            retry_after_seconds: CHECKOUT_WORKER_LEASE_RETRY_SECONDS,
+          }),
+          {
+            status: 202,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Retry-After': String(CHECKOUT_WORKER_LEASE_RETRY_SECONDS),
+            },
+          }
+        );
       }
-    );
+
+      if (resumed.resume_state === 'paid' || resumed.resume_state === 'payment_pending') {
+        return jsonResponse({
+          checkout_protocol_version: CHECKOUT_PROTOCOL_VERSION,
+          checkout_state: resumed.resume_state,
+          checkout_attempt_id: checkoutAttemptId,
+          checkout_request_id: checkoutRequestId,
+          checkout_intent_id: resumed.checkout_intent_id,
+          checkout_session_id: resumed.checkout_session_id,
+        });
+      }
+
+      if (resumed.resume_state !== 'resumable' || !resumed.checkout_intent_id) {
+        const status = resumed.resume_state === 'checkout_request_not_found' ? 404 : 409;
+        throw new CheckoutProtocolRequestError(
+          'Checkout request cannot be resumed.',
+          status,
+          resumed.resume_state
+        );
+      }
+
+      preparation = {
+        checkout_intent_id: resumed.checkout_intent_id,
+        reservation_id: '',
+        orchestration_state: resumed.orchestration_state || '',
+        request_replayed: true,
+        worker_lease_acquired: resumed.worker_lease_acquired,
+        worker_lease_expires_at: resumed.worker_lease_expires_at || '',
+      };
+    } else {
+      if (checkoutOperation) {
+        throw new CheckoutInputError('Checkout operation is invalid.');
+      }
+
+      const replaceCheckoutSessionId = cleanText(payload.replace_checkout_session_id, 255) || null;
+      const context = await callCheckoutRpc<CheckoutRequestContext>(
+        supabase,
+        'admit_checkout_request_v1',
+        {
+          p_checkout_attempt_id: checkoutAttemptId,
+          p_checkout_request_id: checkoutRequestId,
+          p_current_user_id: authenticatedUser?.id || null,
+          p_capability_hash: attemptCapabilityHash,
+          p_replace_checkout_session_id: replaceCheckoutSessionId,
+        }
+      );
+
+      if (!context) throw new Error('Checkout request context was not returned.');
+
+      cancellableAdmission =
+        context.admission_state === 'admitted' && !context.existing_checkout_intent_id;
+
+      if (context.admission_state === 'request_not_materialized') {
+        throw new CheckoutProtocolRequestError(
+          'Checkout request was not materialized before its admission expired.',
+          409,
+          'request_not_materialized'
+        );
+      }
+
+      const command = normalizeCheckoutCommand(payload, context.replacement_checkout_intent_id);
+      const commandFingerprint = await fingerprintCheckoutCommand(command);
+
+      if (
+        context.existing_checkout_intent_id &&
+        context.existing_command_fingerprint !== commandFingerprint
+      ) {
+        throw new CheckoutProtocolRequestError(
+          'Checkout request conflicts with its original command.',
+          409,
+          'checkout_request_conflict'
+        );
+      }
+
+      if (context.existing_orchestration_state === 'superseded') {
+        throw new CheckoutProtocolRequestError(
+          'Checkout request has been superseded.',
+          409,
+          'superseded'
+        );
+      }
+
+      if (
+        context.existing_checkout_intent_id &&
+        !['active', 'payment_pending'].includes(context.attempt_status)
+      ) {
+        throw new CheckoutProtocolRequestError(
+          'Checkout attempt can no longer return a payable Session.',
+          409,
+          'checkout_attempt_terminal'
+        );
+      }
+
+      let canonicalSnapshot: Record<string, unknown> | null = null;
+      let canonicalItems: Array<Record<string, unknown>> | null = null;
+      let canonicalShippingOptions: Array<Record<string, unknown>> | null = null;
+
+      if (!context.existing_checkout_intent_id) {
+        if (!command.shipping_method_name) {
+          throw new CheckoutInputError('Please select a shipping method.');
+        }
+
+        const validatedItems = await resolveCanonicalCart(supabase, command.cart);
+        const subtotalAmount = validatedItems.reduce((total, item) => total + item.line_total, 0);
+        const totalWeightGrams = validatedItems.reduce(
+          (total, item) => total + item.weight_grams,
+          0
+        );
+
+        if (totalWeightGrams <= 0) {
+          throw new CheckoutInputError('Basket weight could not be calculated.');
+        }
+
+        const shippingOptions = await getCanonicalShippingOptions(supabase, totalWeightGrams);
+        const selectedShippingOption = shippingOptions.find(
+          (option) => option.name.trim().toLowerCase() === command.shipping_method_name
+        );
+
+        if (!selectedShippingOption) {
+          throw new CheckoutInputError('Selected shipping method is unavailable.');
+        }
+
+        const orderedShippingOptions = [
+          selectedShippingOption,
+          ...shippingOptions.filter((option) => option.id !== selectedShippingOption.id),
+        ];
+        const stripeCustomer = await getStripeCustomer(context.bound_user_id || undefined);
+        const trustedIdentityEmail = context.bound_user_id
+          ? cleanText(authenticatedUser?.email, 320) || null
+          : null;
+        const discountEvaluation = command.discount_code
+          ? await evaluateSubmittedDiscount({
+              code: command.discount_code,
+              subtotalAmount,
+              shippingAmount: selectedShippingOption.shipping,
+              userId: context.bound_user_id,
+              trustedEmail: trustedIdentityEmail,
+              phone: command.shipping_phone,
+              shippingAddress: command.shipping_address,
+            })
+          : null;
+        const shippingAmount = discountEvaluation
+          ? discountEvaluation.final_shipping_amount
+          : selectedShippingOption.shipping;
+        const totalAmount = discountEvaluation
+          ? discountEvaluation.total_amount
+          : subtotalAmount + shippingAmount;
+
+        canonicalSnapshot = {
+          customer_email: stripeCustomer.email,
+          subtotal_amount: subtotalAmount,
+          shipping_amount: shippingAmount,
+          total_amount: totalAmount,
+          currency: 'gbp',
+          shipping_method_name: selectedShippingOption.name,
+          shipping_method_id: selectedShippingOption.id,
+          shipping_rate_id: selectedShippingOption.rate_id,
+          total_weight_grams: totalWeightGrams,
+          shipping_name: command.shipping_name,
+          shipping_phone: command.shipping_phone,
+          shipping_address: command.shipping_address,
+          billing_name: command.billing_name,
+          billing_address: command.billing_address,
+          billing_is_different: command.billing_is_different,
+          stripe_customer_id: stripeCustomer.id,
+          create_account_requested: command.create_account_requested,
+          discount_code_id: discountEvaluation?.discount_code_id || null,
+          discount_code: discountEvaluation?.code || null,
+          discount_amount: discountEvaluation?.discount_amount || 0,
+          shipping_discount_amount: discountEvaluation?.shipping_discount_amount || 0,
+          discount_name: discountEvaluation?.name || null,
+          discount_type: discountEvaluation?.discount_type || null,
+          stripe_return_url: CHECKOUT_RETURN_URL,
+        };
+        canonicalItems = validatedItems;
+        canonicalShippingOptions = orderedShippingOptions.map((option) => ({
+          shipping_method_id: option.id,
+          shipping_rate_id: option.rate_id,
+          display_name: option.name,
+          description: option.description,
+          carrier: option.carrier,
+          amount: getStripeShippingAmount(
+            option.shipping,
+            discountEvaluation?.discount_type || null
+          ),
+          original_amount: option.shipping,
+          currency: option.currency,
+        }));
+      }
+
+      preparation = await callCheckoutRpc<PreparedCheckoutRequest>(
+        supabase,
+        'prepare_checkout_request',
+        {
+          p_checkout_attempt_id: checkoutAttemptId,
+          p_checkout_request_id: checkoutRequestId,
+          p_user_id: context.bound_user_id,
+          p_capability_hash: attemptCapabilityHash,
+          p_command_fingerprint: commandFingerprint,
+          p_replaces_checkout_intent_id: command.replaces_checkout_intent_id,
+          p_worker_lease_id: workerLeaseId,
+          p_reservation_expires_at: new Date(Date.now() + 29 * 60 * 1000).toISOString(),
+          p_snapshot: canonicalSnapshot,
+          p_items: canonicalItems,
+          p_shipping_options: canonicalShippingOptions,
+        }
+      );
+    }
 
     if (!preparation) throw new Error('Prepared checkout request was not returned.');
 
@@ -917,6 +1079,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
         JSON.stringify({
           error: 'Checkout preparation is still processing.',
           checkout_orchestration_error: 'operation_in_progress',
+          retry_after_seconds: CHECKOUT_WORKER_LEASE_RETRY_SECONDS,
         }),
         {
           status: 202,
@@ -1177,10 +1340,26 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
     });
   } catch (error) {
     if (error instanceof CheckoutInputError) {
+      if (cancellableAdmission) {
+        await cancelAdmissionBestEffort(
+          admittedAttemptId,
+          admittedRequestId,
+          admittedUserId,
+          admittedCapabilityHash
+        );
+      }
       return jsonResponse({ error: error.message }, 400);
     }
 
     if (error instanceof DiscountEligibilityError) {
+      if (cancellableAdmission) {
+        await cancelAdmissionBestEffort(
+          admittedAttemptId,
+          admittedRequestId,
+          admittedUserId,
+          admittedCapabilityHash
+        );
+      }
       return jsonResponse(
         {
           error: error.message,
@@ -1195,8 +1374,39 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     if (error instanceof CheckoutProtocolRequestError) {
       return jsonResponse(
-        { error: error.message, checkout_orchestration_error: error.code },
+        {
+          error: error.message,
+          checkout_orchestration_error: error.code,
+          ...(error.retryAfterSeconds !== null
+            ? { retry_after_seconds: error.retryAfterSeconds }
+            : {}),
+        },
         error.status
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      (error.message.includes('unresolved admitted request') ||
+        error.message.includes('unresolved operation'))
+    ) {
+      return jsonResponse(
+        {
+          error: 'Checkout already has an operation in progress.',
+          checkout_orchestration_error: 'operation_in_progress',
+          retry_after_seconds: CHECKOUT_WORKER_LEASE_RETRY_SECONDS,
+        },
+        409
+      );
+    }
+
+    if (error instanceof Error && error.message.includes('identity conflict')) {
+      return jsonResponse(
+        {
+          error: 'Checkout attempt authorization is invalid.',
+          checkout_orchestration_error: 'checkout_request_conflict',
+        },
+        403
       );
     }
 
@@ -1207,6 +1417,56 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     return jsonResponse({ error: 'Unable to prepare Checkout.' }, 500);
   }
+}
+
+async function shouldUseReservationCheckout(request: Request, payload: Record<string, unknown>) {
+  const operation = cleanText(payload.checkout_operation, 20).toLowerCase();
+  const reservationsEnabled = isCheckoutReservationsEnabled(
+    Deno.env.get('CHECKOUT_RESERVATIONS_ENABLED')
+  );
+
+  const initialRoute = getCheckoutProtocolRoute({
+    operation,
+    reservationsEnabled,
+    attemptExists: false,
+    existingAttemptProtocol: null,
+  });
+
+  if (initialRoute === 'reservation_v1') return true;
+  if (initialRoute === 'invalid') {
+    throw new CheckoutInputError('Checkout operation is invalid.');
+  }
+
+  if (!payload.checkout_attempt_id && !payload.checkout_attempt_token) return false;
+
+  const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
+  const attemptToken = getRequiredAttemptToken(payload);
+  const authenticatedUser = await getAuthenticatedUser(supabase, request);
+  const protocol = await callCheckoutRpc<{
+    attempt_exists: boolean;
+    checkout_protocol_version: string | null;
+  }>(supabase, 'get_checkout_attempt_protocol', {
+    p_checkout_attempt_id: checkoutAttemptId,
+    p_current_user_id: authenticatedUser?.id || null,
+    p_capability_hash: await sha256Hex(attemptToken),
+  });
+
+  const existingRoute = getCheckoutProtocolRoute({
+    operation,
+    reservationsEnabled,
+    attemptExists: Boolean(protocol?.attempt_exists),
+    existingAttemptProtocol: protocol?.checkout_protocol_version || null,
+  });
+
+  if (existingRoute === 'invalid') {
+    throw new CheckoutProtocolRequestError(
+      'Checkout attempt protocol is unavailable.',
+      409,
+      'checkout_request_conflict'
+    );
+  }
+
+  return existingRoute === 'reservation_v1';
 }
 
 serve(async (request) => {
@@ -1236,7 +1496,7 @@ serve(async (request) => {
       throw new CheckoutInputError('Invalid request body.');
     }
 
-    if (isCheckoutReservationsEnabled(Deno.env.get('CHECKOUT_RESERVATIONS_ENABLED'))) {
+    if (await shouldUseReservationCheckout(request, payload as Record<string, unknown>)) {
       return await handleReservationCheckout(request, payload as Record<string, unknown>);
     }
 
@@ -1659,6 +1919,13 @@ serve(async (request) => {
           checkout_replacement_error: error.publicCode,
         },
         409
+      );
+    }
+
+    if (error instanceof CheckoutProtocolRequestError) {
+      return jsonResponse(
+        { error: error.message, checkout_orchestration_error: error.code },
+        error.status
       );
     }
 

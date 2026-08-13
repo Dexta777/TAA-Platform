@@ -1,7 +1,11 @@
 import { clearCart } from '../cart/cart.js';
 import { refreshCartUi } from '../cart/cart-ui.js';
 import { getCheckoutConfirmation } from '../../services/supabase/checkout.js';
-import { getCheckoutCapability } from './checkout-capability.js';
+import {
+  getCheckoutCapabilityForConfirmation,
+  removeCheckoutCapability,
+} from './checkout-capability.js';
+import { clearCheckoutAttempt } from './checkout-attempt.js';
 
 const MAX_CONFIRMATION_ATTEMPTS = 8;
 const CONFIRMATION_RETRY_DELAY_MS = 1500;
@@ -141,14 +145,19 @@ export async function initOrderConfirmation() {
 
   if (!checkoutSessionId) return null;
 
-  const capability = getCheckoutCapability(checkoutSessionId);
-
   try {
+    const capability = getCheckoutCapabilityForConfirmation(checkoutSessionId);
     const result = await loadConfirmation(checkoutSessionId, capability?.confirmationToken || null);
 
     renderConfirmation(result.order, result.items || []);
     clearCart();
     refreshCartUi();
+
+    if (capability?.protocol === 'reservation_v1') {
+      clearCheckoutAttempt();
+    } else if (capability?.protocol === 'legacy') {
+      removeCheckoutCapability(checkoutSessionId);
+    }
 
     return Object.freeze({ orderId: result.order.id });
   } catch (error) {

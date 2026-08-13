@@ -387,6 +387,9 @@ deno_version = 2
 [functions.create-checkout-session]
 verify_jwt = false
 
+[functions.abandon-checkout-attempt]
+verify_jwt = false
+
 [functions.get-checkout-confirmation]
 verify_jwt = false
 

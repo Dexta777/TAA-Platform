@@ -85,7 +85,9 @@ serve(async (request) => {
       return jsonResponse({
         order: null,
         items: [],
-        pending: checkoutIntent.status === 'pending' || checkoutIntent.status === 'paid',
+        pending: ['preparing', 'pending', 'payment_pending', 'paid'].includes(
+          checkoutIntent.status
+        ),
       });
     }
 

@@ -5,6 +5,12 @@
 Slice 5C implements attempt-owned stock reservation, atomic paid consumption, authoritative Stripe
 lifecycle handling, and durable reconciliation. `CHECKOUT_RESERVATIONS_ENABLED` remains off.
 
+Slice 5D adds browser attempt admission, same-tab recovery, capability-authorized abandonment and
+reservation-v1 confirmation. The feature flag controls admission of genuinely new attempts only.
+Existing reservation-v1 attempts must continue through retry, resume, replacement, confirmation,
+webhook finalization and reconciliation while the flag is off. Browser state is a tab-scoped
+capability cache; PostgreSQL and Stripe remain authoritative.
+
 Before enabling it in production:
 
 1. Deploy and verify the additive Slice 5C migration and both Edge Functions while the feature flag
@@ -19,6 +25,16 @@ Before enabling it in production:
 6. Establish an operator runbook for refunding or manually fulfilling paid incidents.
 7. Run an end-to-end payment, delayed-payment, replacement, expiry, and missed-webhook exercise in
    staging before enabling the feature flag.
+8. Deploy the immutable Slice 5D frontend and verify reload recovery at every request/replacement
+   stage before enabling new reservation attempts.
+9. Remove the deployed legacy Webflow order-confirmation caller, disable or undeploy
+   `get-order-confirmation`, and prove that an arbitrary PaymentIntent ID cannot return order PII.
+
+The repository retains `get-order-confirmation` temporarily because
+`legacy/webflow/order-confirmation.js` still references it. It is not an approved production path
+for reservation checkout and must never be reactivated as part of rollback. Only
+`get-checkout-confirmation`, authorized by account ownership or a valid confirmation capability,
+may serve order confirmation PII after cutover.
 
 An overdue local reservation is never released solely because its timestamp elapsed. Stripe must
 authoritatively prove that no payable path remains. Stripe unavailability therefore retains stock

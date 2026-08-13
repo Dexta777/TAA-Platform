@@ -1,3 +1,5 @@
+import { getCheckoutCapabilityForSession, loadCheckoutAttempt } from './checkout-attempt.js';
+
 const CAPABILITY_KEY_PREFIX = 'taa_checkout_confirmation:';
 const CAPABILITY_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -63,6 +65,27 @@ export function getCheckoutCapability(checkoutSessionId) {
 
     return null;
   }
+}
+
+export function getCheckoutCapabilityForConfirmation(checkoutSessionId) {
+  let reservationCapability = null;
+
+  try {
+    reservationCapability = getCheckoutCapabilityForSession(
+      loadCheckoutAttempt(),
+      checkoutSessionId
+    );
+  } catch (error) {
+    console.error('Reservation checkout capability could not be read.', error);
+  }
+
+  if (reservationCapability) {
+    return { ...reservationCapability, protocol: 'reservation_v1' };
+  }
+
+  const legacyCapability = getCheckoutCapability(checkoutSessionId);
+
+  return legacyCapability ? { ...legacyCapability, protocol: 'legacy' } : null;
 }
 
 export function removeCheckoutCapability(checkoutSessionId) {

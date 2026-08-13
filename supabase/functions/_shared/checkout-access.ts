@@ -86,6 +86,37 @@ function constantTimeEqual(left: string, right: string) {
   return difference === 0;
 }
 
+export async function hasCheckoutAccess({
+  checkoutIntent,
+  authenticatedUserId,
+  confirmationToken,
+  now = Date.now(),
+}: {
+  checkoutIntent: {
+    user_id: string | null;
+    confirmation_token_hash: string | null;
+    confirmation_token_expires_at: string | null;
+  };
+  authenticatedUserId: string | null;
+  confirmationToken: string;
+  now?: number;
+}) {
+  if (authenticatedUserId && checkoutIntent.user_id === authenticatedUserId) return true;
+
+  if (
+    !confirmationToken ||
+    !checkoutIntent.confirmation_token_hash ||
+    !checkoutIntent.confirmation_token_expires_at ||
+    new Date(checkoutIntent.confirmation_token_expires_at).getTime() <= now
+  ) {
+    return false;
+  }
+
+  const suppliedTokenHash = await sha256Hex(confirmationToken);
+
+  return constantTimeEqual(suppliedTokenHash, checkoutIntent.confirmation_token_hash);
+}
+
 export async function authorizeCheckoutAccess(
   supabase: SupabaseClient,
   request: Request,
@@ -104,26 +135,14 @@ export async function authorizeCheckoutAccess(
   if (!checkoutIntent) return { authorized: false, checkoutIntent: null };
 
   const authenticatedUser = await getAuthenticatedUser(supabase, request);
-  const ownsCheckout = Boolean(
-    authenticatedUser?.id && checkoutIntent.user_id === authenticatedUser.id
-  );
-  let hasValidCapability = false;
-
-  if (
-    confirmationToken &&
-    checkoutIntent.confirmation_token_hash &&
-    checkoutIntent.confirmation_token_expires_at &&
-    new Date(checkoutIntent.confirmation_token_expires_at).getTime() > Date.now()
-  ) {
-    const suppliedTokenHash = await sha256Hex(confirmationToken);
-    hasValidCapability = constantTimeEqual(
-      suppliedTokenHash,
-      checkoutIntent.confirmation_token_hash
-    );
-  }
+  const authorized = await hasCheckoutAccess({
+    checkoutIntent,
+    authenticatedUserId: authenticatedUser?.id || null,
+    confirmationToken,
+  });
 
   return {
-    authorized: ownsCheckout || hasValidCapability,
+    authorized,
     checkoutIntent,
   };
 }

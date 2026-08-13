@@ -5,6 +5,7 @@ import {
   classifyStripeFailure,
   deterministicStringify,
   fingerprintCheckoutCommand,
+  getCheckoutProtocolRoute,
   getStripeFailureAction,
   getStripeIdempotencyKeys,
   getStripeSessionActivationAction,
@@ -90,6 +91,48 @@ Deno.test('feature flag enables only normalized true', () => {
   assertEquals(isCheckoutReservationsEnabled('TRUE'), true);
   assertEquals(isCheckoutReservationsEnabled(undefined), false);
   assertEquals(isCheckoutReservationsEnabled('1'), false);
+});
+
+Deno.test('flag-off routing keeps existing reservation attempts on reservation v1', () => {
+  assertEquals(
+    getCheckoutProtocolRoute({
+      operation: '',
+      reservationsEnabled: false,
+      attemptExists: true,
+      existingAttemptProtocol: 'reservation_v1',
+    }),
+    'reservation_v1'
+  );
+  assertEquals(
+    getCheckoutProtocolRoute({
+      operation: 'resume',
+      reservationsEnabled: false,
+      attemptExists: true,
+      existingAttemptProtocol: 'reservation_v1',
+    }),
+    'reservation_v1'
+  );
+});
+
+Deno.test('flag-off routing sends only genuinely new attempts to legacy', () => {
+  assertEquals(
+    getCheckoutProtocolRoute({
+      operation: '',
+      reservationsEnabled: false,
+      attemptExists: false,
+      existingAttemptProtocol: null,
+    }),
+    'legacy'
+  );
+  assertEquals(
+    getCheckoutProtocolRoute({
+      operation: '',
+      reservationsEnabled: false,
+      attemptExists: true,
+      existingAttemptProtocol: null,
+    }),
+    'invalid'
+  );
 });
 
 Deno.test('cart normalization aggregates and sorts the canonical command order', () => {

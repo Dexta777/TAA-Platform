@@ -85,6 +85,29 @@ export function isCheckoutReservationsEnabled(value: string | undefined) {
   return value?.trim().toLowerCase() === 'true';
 }
 
+export type CheckoutProtocolRoute = 'legacy' | 'reservation_v1' | 'invalid';
+
+export function getCheckoutProtocolRoute({
+  operation,
+  reservationsEnabled,
+  attemptExists,
+  existingAttemptProtocol,
+}: {
+  operation: string;
+  reservationsEnabled: boolean;
+  attemptExists: boolean;
+  existingAttemptProtocol: string | null;
+}): CheckoutProtocolRoute {
+  if (operation === 'resume') return 'reservation_v1';
+  if (operation) return 'invalid';
+
+  if (attemptExists) {
+    return existingAttemptProtocol === CHECKOUT_PROTOCOL_VERSION ? 'reservation_v1' : 'invalid';
+  }
+
+  return reservationsEnabled ? 'reservation_v1' : 'legacy';
+}
+
 export type StripeFailureKind =
   | 'transport_ambiguous'
   | 'server_indeterminate'
@@ -411,6 +434,7 @@ export function buildCheckoutResponse(
   if (!session.client_secret) throw new Error('Stripe did not return a Checkout client secret.');
 
   return {
+    checkout_protocol_version: CHECKOUT_PROTOCOL_VERSION,
     client_secret: session.client_secret,
     checkout_session_id: session.id,
     checkout_intent_id: snapshot.id,
