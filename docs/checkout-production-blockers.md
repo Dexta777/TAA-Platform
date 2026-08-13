@@ -49,14 +49,61 @@ equivalent retry mechanism before Klaviyo delivery can be considered reliable.
 
 ## Public checkout endpoint abuse protection
 
-`create-checkout-session` is intentionally public so guest checkout can create a Session. It uses
-privileged server-side Supabase access internally after independently validating catalogue and
-shipping data. Before meaningful production traffic, the public checkout endpoints require an
-appropriate rate-limiting and abuse-protection layer.
+Phase 6A adds exact-origin browser admission, project browser-key admission, bounded bodies, and an
+atomic PostgreSQL-backed limiter. Before deploying Phase 6A:
 
-The current permissive CORS policy must also be restricted to approved TAA production and staging
-origins before production cutover. CORS is browser defence-in-depth only; it is not authentication
-and does not prevent direct requests to a public Edge Function.
+1. Configure `TAA_BROWSER_ALLOWED_ORIGINS` with exact origins. Production must include
+   `https://www.theanimalalchemist.com`; the apex is not implicit.
+2. Provision one high-entropy `TAA_RATE_LIMIT_PEPPER` per environment. Losing or changing it resets
+   derived limiter identities but exposes no raw network addresses.
+3. Apply the Phase 6A migration and deploy all public functions together so handler/RPC contracts
+   remain aligned. Do not enable reservations as part of this deployment.
+4. Verify pre-admission checkout 429 responses say `checkout_request_admitted: false`, while an
+   already persisted operation says `true` and retains the same request ID.
+5. Exercise the launch policies under representative NAT and IPv6 traffic, then tune named policy
+   values only from measured results.
+
+Limiter failure is deliberately fail closed with 503 before Stripe or expensive business work.
+CORS and the project browser key are ingress defence-in-depth, not sensitive checkout authority;
+account ownership and checkout capabilities remain mandatory.
+
+## Private Klaviyo catalogue-sync cutover
+
+Use this security-first order; never put the token in Git, SQL, logs, `sync_logs`, or trigger data:
+
+1. Generate one random purpose-specific secret and provision the same value as the Edge secret
+   `TAA_KLAVIYO_CATALOG_SYNC_SECRET` and Vault secret `taa_klaviyo_catalog_sync_secret`.
+2. Deploy `sync-klaviyo-catalog` requiring `x-taa-internal-token`. Old unauthenticated `pg_net`
+   calls may temporarily fail at this point, which is safer than accepting unauthenticated writes.
+3. Apply the additive Phase 6A migration so the trigger reads Vault and sends the token.
+4. Verify authenticated product and variant trigger sync in staging.
+5. Verify missing and wrong tokens have no provider or database side effects.
+
+Missing Vault configuration, authentication failure, queue failure, or provider failure must never
+abort the underlying product mutation.
+
+## Webhook and reconciler operations
+
+Staging E2E must record Stripe webhook processing duration for completed, delayed-payment,
+replacement, and expiry paths. Alert before the duration approaches Stripe's delivery timeout; the
+synchronous Slice 5C paid path is intentionally unchanged in Phase 6A.
+
+Reconciler rotation uses `CHECKOUT_RECONCILIATION_SECRET` as current and optionally
+`CHECKOUT_RECONCILIATION_PREVIOUS_SECRET` during a bounded rotation window. Remove the previous
+secret after all callers have switched. Successful authentication remains a prerequisite to any
+job claim. Phase 6A creates no reconciliation schedule.
+
+## Legacy endpoint retirement order
+
+Do not undeploy during Phase 6A. After Webflow and custom-code callers are proven absent, retire in
+this order:
+
+1. `delete-klaviyo-old-products`
+2. `get-order-confirmation` (never re-enable it during rollback)
+3. `create-payment-intent`
+
+When retiring `create-payment-intent`, preserve webhook support only for already-existing legacy
+PaymentIntents until reconciliation proves that compatibility path is no longer needed.
 
 ## Discount entitlement concurrency
 

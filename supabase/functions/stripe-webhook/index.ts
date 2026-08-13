@@ -20,6 +20,8 @@ import {
 import { resolvePaidActiveIntentReplacement } from '../_shared/checkout-paid-path.ts';
 import { callCheckoutRpc } from '../_shared/checkout-orchestration.ts';
 import { getStripeIdempotencyKeys } from '../_shared/checkout-protocol.ts';
+import { HttpSecurityError } from '../_shared/http-security.ts';
+import { readStripeWebhookRequest } from '../_shared/stripe-webhook-security.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 
@@ -242,7 +244,8 @@ async function sendKlaviyoPlacedOrder(order: any, items: any[]) {
   });
 
   if (!response.ok) {
-    console.error('Klaviyo event failed:', response.status, await response.text());
+    await response.body?.cancel();
+    console.error('Klaviyo event failed:', { status: response.status });
     return;
   }
 
@@ -880,13 +883,22 @@ async function updateCheckoutSessionStatus(sessionId: string, status: string) {
 }
 
 serve(async (request) => {
-  const signature = request.headers.get('stripe-signature');
+  let signature: string;
+  let body: string;
 
-  if (!signature) {
-    return new Response('Missing Stripe signature', { status: 400 });
+  try {
+    const ingress = await readStripeWebhookRequest(request);
+    signature = ingress.signature;
+    body = ingress.rawBody;
+    requireEnvironment('STRIPE_WEBHOOK_SECRET');
+  } catch (error) {
+    const status = error instanceof HttpSecurityError ? error.status : 500;
+    const message =
+      error instanceof HttpSecurityError ? error.message : 'Webhook configuration unavailable';
+
+    return new Response(message, { status });
   }
 
-  const body = await request.text();
   let event: Stripe.Event;
 
   try {
@@ -896,7 +908,13 @@ serve(async (request) => {
       requireEnvironment('STRIPE_WEBHOOK_SECRET')
     );
   } catch (error) {
-    console.error('STRIPE WEBHOOK SIGNATURE ERROR:', error);
+    console.error('STRIPE WEBHOOK SIGNATURE ERROR:', {
+      error_name: error instanceof Error ? error.name : 'unknown',
+      error_type:
+        error && typeof error === 'object' && 'type' in error
+          ? String((error as { type?: unknown }).type || 'unknown')
+          : 'unknown',
+    });
 
     return new Response('Webhook signature verification failed', { status: 400 });
   }
@@ -972,7 +990,9 @@ serve(async (request) => {
 
     return new Response('ok', { status: 200 });
   } catch (error) {
-    console.error('WEBHOOK ERROR:', error);
+    console.error('WEBHOOK ERROR:', {
+      error_name: error instanceof Error ? error.name : 'unknown',
+    });
 
     return new Response('Webhook processing failed', { status: 500 });
   }

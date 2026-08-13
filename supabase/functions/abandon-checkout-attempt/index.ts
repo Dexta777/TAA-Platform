@@ -8,14 +8,32 @@ import {
 } from '../_shared/checkout-abandonment.ts';
 import { callCheckoutRpc } from '../_shared/checkout-orchestration.ts';
 import { normalizeUuid } from '../_shared/checkout-protocol.ts';
+import {
+  browserErrorResponse,
+  type BrowserSecurityContext,
+  HttpSecurityError,
+  jsonResponse,
+  prepareBrowserRequest,
+  readBoundedJson,
+  rejectOversizeContentLength,
+  requireExactFields,
+  requireJsonContentType,
+} from '../_shared/http-security.ts';
+import {
+  consumeRateLimits,
+  getAuthoritativeDimensions,
+  getAuthoritativeRateLimitIdentity,
+  getNetworkDimensions,
+  getNetworkRateLimitIdentity,
+  RATE_LIMIT_POLICIES,
+  RateLimitError,
+  RateLimitServiceError,
+  rateLimitResponse,
+} from '../_shared/rate-limit.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-};
+const MAXIMUM_BODY_BYTES = 4 * 1024;
+const ALLOWED_FIELDS = new Set(['checkout_attempt_id', 'checkout_attempt_token']);
 
 function requireEnvironment(name: string) {
   const value = Deno.env.get(name)?.trim();
@@ -33,13 +51,6 @@ const supabase = createClient(
   requireEnvironment('SUPABASE_SERVICE_ROLE_KEY'),
   { auth: { persistSession: false, autoRefreshToken: false } }
 );
-
-function jsonResponse(payload: unknown, status = 200) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  });
-}
 
 function getRequiredAttemptToken(payload: Record<string, unknown>) {
   const token = String(payload.checkout_attempt_token ?? '').trim();
@@ -79,15 +90,26 @@ async function enqueueReconciliation(
 }
 
 serve(async (request) => {
-  if (request.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
-  if (request.method !== 'POST') return jsonResponse({ error: 'Method not allowed.' }, 405);
+  let securityContext: BrowserSecurityContext | null = null;
 
   try {
-    const payload = await request.json();
+    const ingress = prepareBrowserRequest(request);
+    securityContext = ingress.context;
+    if (ingress.response) return ingress.response;
 
-    if (!payload || typeof payload !== 'object') {
-      return jsonResponse({ error: 'Invalid request body.' }, 400);
-    }
+    requireJsonContentType(request);
+    rejectOversizeContentLength(request, MAXIMUM_BODY_BYTES);
+    const networkIdentity = await getNetworkRateLimitIdentity(request);
+    await consumeRateLimits(
+      supabase,
+      getNetworkDimensions(networkIdentity, [
+        RATE_LIMIT_POLICIES.abandonMinute,
+        RATE_LIMIT_POLICIES.abandonHour,
+      ]),
+      { scope: 'abandon_network' }
+    );
+    const payload = await readBoundedJson(request, MAXIMUM_BODY_BYTES);
+    requireExactFields(payload, ALLOWED_FIELDS);
 
     const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
     const attemptToken = getRequiredAttemptToken(payload);
@@ -104,15 +126,25 @@ serve(async (request) => {
     );
 
     if (!context || context.context_state === 'attempt_not_found') {
-      return jsonResponse({ result: 'attempt_not_found' });
+      return jsonResponse(securityContext, { result: 'attempt_not_found' });
     }
 
+    const attemptIdentity = await getAuthoritativeRateLimitIdentity(
+      'abandon-attempt',
+      checkoutAttemptId
+    );
+    await consumeRateLimits(
+      supabase,
+      getAuthoritativeDimensions(attemptIdentity, [RATE_LIMIT_POLICIES.abandonAttempt]),
+      { scope: 'abandon_authorized_attempt' }
+    );
+
     if (context.context_state === 'already_paid') {
-      return jsonResponse({ result: 'already_paid' });
+      return jsonResponse(securityContext, { result: 'already_paid' });
     }
 
     if (context.context_state === 'already_terminal') {
-      return jsonResponse({ result: 'already_terminal' });
+      return jsonResponse(securityContext, { result: 'already_terminal' });
     }
 
     if (context.context_state === 'safe_unmaterialized') {
@@ -126,7 +158,9 @@ serve(async (request) => {
         }
       );
 
-      return jsonResponse({ result: terminalized ? 'abandoned' : 'reconciliation_pending' });
+      return jsonResponse(securityContext, {
+        result: terminalized ? 'abandoned' : 'reconciliation_pending',
+      });
     }
 
     if (context.context_state !== 'active_session') {
@@ -138,17 +172,17 @@ serve(async (request) => {
         );
       }
 
-      return jsonResponse({ result: 'reconciliation_pending' });
+      return jsonResponse(securityContext, { result: 'reconciliation_pending' });
     }
 
     if (!context.active_checkout_intent_id || !context.active_checkout_session_id) {
       await enqueueReconciliation(context, checkoutAttemptId);
-      return jsonResponse({ result: 'reconciliation_pending' });
+      return jsonResponse(securityContext, { result: 'reconciliation_pending' });
     }
 
     if (!context.active_checkout_request_id) {
       await enqueueReconciliation(context, checkoutAttemptId);
-      return jsonResponse({ result: 'reconciliation_pending' });
+      return jsonResponse(securityContext, { result: 'reconciliation_pending' });
     }
 
     let session: Stripe.Checkout.Session;
@@ -157,7 +191,7 @@ serve(async (request) => {
       session = await stripe.checkout.sessions.retrieve(context.active_checkout_session_id);
     } catch {
       await enqueueReconciliation(context, checkoutAttemptId);
-      return jsonResponse({ result: 'reconciliation_pending' });
+      return jsonResponse(securityContext, { result: 'reconciliation_pending' });
     }
 
     if (
@@ -169,14 +203,14 @@ serve(async (request) => {
       )
     ) {
       await enqueueReconciliation(context, checkoutAttemptId);
-      return jsonResponse({ result: 'reconciliation_pending' });
+      return jsonResponse(securityContext, { result: 'reconciliation_pending' });
     }
 
     let action = getCheckoutAbandonmentAction(session);
 
     if (action === 'already_paid') {
       await enqueueReconciliation(context, checkoutAttemptId);
-      return jsonResponse({ result: 'already_paid' });
+      return jsonResponse(securityContext, { result: 'already_paid' });
     }
 
     if (action === 'expire_then_verify') {
@@ -189,7 +223,7 @@ serve(async (request) => {
         session = await stripe.checkout.sessions.retrieve(session.id);
       } catch {
         await enqueueReconciliation(context, checkoutAttemptId);
-        return jsonResponse({ result: 'reconciliation_pending' });
+        return jsonResponse(securityContext, { result: 'reconciliation_pending' });
       }
 
       action = getCheckoutAbandonmentAction(session);
@@ -197,7 +231,7 @@ serve(async (request) => {
 
     if (action !== 'terminalize') {
       await enqueueReconciliation(context, checkoutAttemptId);
-      return jsonResponse({ result: 'reconciliation_pending' });
+      return jsonResponse(securityContext, { result: 'reconciliation_pending' });
     }
 
     const terminal = await callCheckoutRpc<{
@@ -208,15 +242,28 @@ serve(async (request) => {
       p_reason: 'expired_unpaid',
     });
 
-    return jsonResponse({
+    return jsonResponse(securityContext, {
       result: terminal?.reservation_status === 'released' ? 'abandoned' : 'reconciliation_pending',
     });
   } catch (error) {
+    if (error instanceof RateLimitError && securityContext) {
+      return rateLimitResponse(securityContext, error);
+    }
+    if (error instanceof HttpSecurityError) return browserErrorResponse(error, securityContext);
+    if (error instanceof RateLimitServiceError && securityContext) {
+      return jsonResponse(securityContext, { error: error.message }, 503);
+    }
+
     console.error('ABANDON CHECKOUT ATTEMPT ERROR:', {
       error_name: error instanceof Error ? error.name : 'unknown',
-      error_message: error instanceof Error ? error.message : 'unknown',
     });
 
-    return jsonResponse({ error: 'Checkout attempt could not be abandoned safely.' }, 409);
+    return securityContext
+      ? jsonResponse(
+          securityContext,
+          { error: 'Checkout attempt could not be abandoned safely.' },
+          409
+        )
+      : browserErrorResponse(error);
   }
 });

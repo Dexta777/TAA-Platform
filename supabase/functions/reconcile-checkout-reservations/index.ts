@@ -27,6 +27,7 @@ import {
   getStripeIdempotencyKeys,
   sha256Deterministic,
 } from '../_shared/checkout-protocol.ts';
+import { isBearerTokenAuthorized } from '../_shared/internal-auth.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 const MAX_DISCOVERY_PAGES = 5;
@@ -76,20 +77,10 @@ type ReconciliationIntent = {
 };
 
 function authorized(request: Request) {
-  const expected = new TextEncoder().encode(requireEnvironment('CHECKOUT_RECONCILIATION_SECRET'));
-  const supplied = new TextEncoder().encode(
-    request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || ''
-  );
+  const currentSecret = requireEnvironment('CHECKOUT_RECONCILIATION_SECRET');
+  const previousSecret = Deno.env.get('CHECKOUT_RECONCILIATION_PREVIOUS_SECRET')?.trim() || '';
 
-  if (expected.length !== supplied.length) return false;
-
-  let difference = 0;
-
-  for (let index = 0; index < expected.length; index += 1) {
-    difference |= expected[index] ^ supplied[index];
-  }
-
-  return difference === 0;
+  return isBearerTokenAuthorized(request, currentSecret, previousSecret);
 }
 
 function getResourceId(resource: string | { id: string } | null) {

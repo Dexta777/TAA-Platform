@@ -6,6 +6,7 @@ import {
   removeCheckoutCapability,
 } from './checkout-capability.js';
 import { clearCheckoutAttempt } from './checkout-attempt.js';
+import { loadConfirmationWithRetry } from './order-confirmation-polling.js';
 
 const MAX_CONFIRMATION_ATTEMPTS = 8;
 const CONFIRMATION_RETRY_DELAY_MS = 1500;
@@ -49,17 +50,21 @@ function formatAddress(address) {
     .join('\n');
 }
 
-async function loadConfirmation(checkoutSessionId, confirmationToken) {
-  for (let attempt = 0; attempt < MAX_CONFIRMATION_ATTEMPTS; attempt += 1) {
-    const result = await getCheckoutConfirmation(checkoutSessionId, confirmationToken);
-
-    if (result.order) return result;
-    if (!result.pending) break;
-
-    await delay(CONFIRMATION_RETRY_DELAY_MS);
-  }
-
-  throw new Error('Your order is still being prepared. Please refresh this page.');
+export async function loadConfirmation(
+  checkoutSessionId,
+  confirmationToken,
+  {
+    requestConfirmation = getCheckoutConfirmation,
+    wait = delay,
+    maximumAttempts = MAX_CONFIRMATION_ATTEMPTS,
+  } = {}
+) {
+  return loadConfirmationWithRetry(checkoutSessionId, confirmationToken, {
+    requestConfirmation,
+    wait,
+    maximumAttempts,
+    normalRetryDelayMs: CONFIRMATION_RETRY_DELAY_MS,
+  });
 }
 
 function renderItems(items, currency) {

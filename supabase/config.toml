@@ -382,8 +382,8 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
-# These browser-facing functions perform request validation and, where sensitive,
-# their own authorization or capability checks.
+# PUBLIC_BROWSER: handlers require exact Origin plus a configured project browser
+# apikey and, where sensitive, account ownership or a checkout capability.
 [functions.create-checkout-session]
 verify_jwt = false
 
@@ -406,6 +406,21 @@ verify_jwt = false
 # Private scheduled worker. It additionally requires CHECKOUT_RECONCILIATION_SECRET.
 # No production schedule is activated by repository configuration.
 [functions.reconcile-checkout-reservations]
+verify_jwt = false
+
+# Private database-trigger target. It requires a dedicated internal token.
+[functions.sync-klaviyo-catalog]
+verify_jwt = false
+
+# Legacy/admin endpoints are explicit pending retirement; this does not approve
+# continued production use. See docs/checkout-production-blockers.md.
+[functions.delete-klaviyo-old-products]
+verify_jwt = false
+
+[functions.get-order-confirmation]
+verify_jwt = false
+
+[functions.create-payment-intent]
 verify_jwt = false
 
 # [edge_runtime.secrets]

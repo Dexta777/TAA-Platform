@@ -55,17 +55,53 @@ import {
   callCheckoutRpc,
   loadPersistedCheckoutSnapshot,
 } from '../_shared/checkout-orchestration.ts';
+import {
+  browserErrorResponse,
+  type BrowserSecurityContext,
+  HttpSecurityError,
+  jsonResponse,
+  prepareBrowserRequest,
+  readBoundedJsonWithSize,
+  rejectOversizeContentLength,
+  requireExactFields,
+  requireJsonContentType,
+} from '../_shared/http-security.ts';
+import {
+  consumeRateLimits,
+  getAuthoritativeDimensions,
+  getAuthoritativeRateLimitIdentity,
+  getNetworkDimensions,
+  getNetworkRateLimitIdentity,
+  RATE_LIMIT_POLICIES,
+  RateLimitError,
+  RateLimitServiceError,
+  rateLimitResponse,
+} from '../_shared/rate-limit.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 const CHECKOUT_RETURN_URL =
   'https://www.theanimalalchemist.com/order-confirmation-test?checkout_session_id={CHECKOUT_SESSION_ID}';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Expose-Headers': 'Retry-After',
-};
+const MAXIMUM_CREATE_BODY_BYTES = 64 * 1024;
+const MAXIMUM_RESUME_BODY_BYTES = 4 * 1024;
+const ALLOWED_FIELDS = new Set([
+  'cart',
+  'shipping_method_name',
+  'discount_code',
+  'replace_checkout_session_id',
+  'replace_confirmation_token',
+  'shipping_name',
+  'shipping_phone',
+  'shipping_address',
+  'billing_name',
+  'billing_address',
+  'billing_is_different',
+  'create_account_requested',
+  'checkout_attempt_id',
+  'checkout_attempt_token',
+  'checkout_request_id',
+  'checkout_operation',
+]);
 
 function requireEnvironment(name: string) {
   const value = Deno.env.get(name)?.trim();
@@ -84,13 +120,6 @@ const supabase = createClient(
   requireEnvironment('SUPABASE_SERVICE_ROLE_KEY'),
   { auth: { persistSession: false, autoRefreshToken: false } }
 );
-
-function jsonResponse(payload: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { ...corsHeaders, ...extraHeaders, 'Content-Type': 'application/json' },
-  });
-}
 
 class DiscountEligibilityError extends Error {
   publicReason: string;
@@ -515,6 +544,7 @@ async function handleStripeMutationFailure(
 }
 
 async function getProtocolCheckoutResponse(
+  securityContext: BrowserSecurityContext,
   snapshot: PersistedCheckoutSnapshot,
   workerLeaseId: string,
   session: Stripe.Checkout.Session,
@@ -558,6 +588,7 @@ async function getProtocolCheckoutResponse(
   }
 
   return jsonResponse(
+    securityContext,
     buildCheckoutResponse(
       snapshot,
       session,
@@ -787,7 +818,11 @@ async function handleProtocolReplacement(
   return previousSnapshot;
 }
 
-async function handleReservationCheckout(request: Request, payload: Record<string, unknown>) {
+async function handleReservationCheckout(
+  request: Request,
+  payload: Record<string, unknown>,
+  securityContext: BrowserSecurityContext
+) {
   let admittedAttemptId: string | null = null;
   let admittedRequestId: string | null = null;
   let admittedCapabilityHash: string | null = null;
@@ -836,7 +871,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
           {
             status: 202,
             headers: {
-              ...corsHeaders,
+              ...securityContext.responseHeaders,
               'Content-Type': 'application/json',
               'Retry-After': String(CHECKOUT_WORKER_LEASE_RETRY_SECONDS),
             },
@@ -845,7 +880,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
       }
 
       if (resumed.resume_state === 'paid' || resumed.resume_state === 'payment_pending') {
-        return jsonResponse({
+        return jsonResponse(securityContext, {
           checkout_protocol_version: CHECKOUT_PROTOCOL_VERSION,
           checkout_state: resumed.resume_state,
           checkout_attempt_id: checkoutAttemptId,
@@ -1084,7 +1119,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
         {
           status: 202,
           headers: {
-            ...corsHeaders,
+            ...securityContext.responseHeaders,
             'Content-Type': 'application/json',
             'Retry-After': String(CHECKOUT_WORKER_LEASE_RETRY_SECONDS),
           },
@@ -1142,7 +1177,12 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
         snapshot.stripe_checkout_session_id
       );
 
-      return await getProtocolCheckoutResponse(snapshot, workerLeaseId, activeSession);
+      return await getProtocolCheckoutResponse(
+        securityContext,
+        snapshot,
+        workerLeaseId,
+        activeSession
+      );
     }
 
     const keys = getStripeIdempotencyKeys(checkoutAttemptId, checkoutRequestId);
@@ -1334,7 +1374,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     snapshot = await loadPersistedCheckoutSnapshot(supabase, snapshot.id);
 
-    return await getProtocolCheckoutResponse(snapshot, workerLeaseId, session, {
+    return await getProtocolCheckoutResponse(securityContext, snapshot, workerLeaseId, session, {
       token: activationCapability.token,
       generation: Number(confirmationGeneration),
     });
@@ -1348,7 +1388,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
           admittedCapabilityHash
         );
       }
-      return jsonResponse({ error: error.message }, 400);
+      return jsonResponse(securityContext, { error: error.message }, 400);
     }
 
     if (error instanceof DiscountEligibilityError) {
@@ -1361,6 +1401,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
         );
       }
       return jsonResponse(
+        securityContext,
         {
           error: error.message,
           discount_error: error.publicReason,
@@ -1374,6 +1415,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     if (error instanceof CheckoutProtocolRequestError) {
       return jsonResponse(
+        securityContext,
         {
           error: error.message,
           checkout_orchestration_error: error.code,
@@ -1394,6 +1436,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
         error.message.includes('unresolved operation'))
     ) {
       return jsonResponse(
+        securityContext,
         {
           error: 'Checkout already has an operation in progress.',
           checkout_orchestration_error: 'operation_in_progress',
@@ -1405,6 +1448,7 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     if (error instanceof Error && error.message.includes('identity conflict')) {
       return jsonResponse(
+        securityContext,
         {
           error: 'Checkout attempt authorization is invalid.',
           checkout_orchestration_error: 'checkout_request_conflict',
@@ -1415,10 +1459,9 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
 
     console.error('CREATE RESERVATION CHECKOUT ERROR:', {
       error_name: error instanceof Error ? error.name : 'unknown',
-      error_message: error instanceof Error ? error.message : 'unknown',
     });
 
-    return jsonResponse({ error: 'Unable to prepare Checkout.' }, 500);
+    return jsonResponse(securityContext, { error: 'Unable to prepare Checkout.' }, 500);
   }
 }
 
@@ -1435,12 +1478,16 @@ async function shouldUseReservationCheckout(request: Request, payload: Record<st
     existingAttemptProtocol: null,
   });
 
-  if (initialRoute === 'reservation_v1') return true;
+  if (initialRoute === 'reservation_v1') {
+    return { useReservationCheckout: true, attemptExists: false };
+  }
   if (initialRoute === 'invalid') {
     throw new CheckoutInputError('Checkout operation is invalid.');
   }
 
-  if (!payload.checkout_attempt_id && !payload.checkout_attempt_token) return false;
+  if (!payload.checkout_attempt_id && !payload.checkout_attempt_token) {
+    return { useReservationCheckout: false, attemptExists: false };
+  }
 
   const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
   const attemptToken = getRequiredAttemptToken(payload);
@@ -1469,38 +1516,99 @@ async function shouldUseReservationCheckout(request: Request, payload: Record<st
     );
   }
 
-  return existingRoute === 'reservation_v1';
+  return {
+    useReservationCheckout: existingRoute === 'reservation_v1',
+    attemptExists: Boolean(protocol?.attempt_exists),
+  };
 }
 
 serve(async (request) => {
-  if (request.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
-  }
-
-  if (request.method !== 'POST') {
-    return jsonResponse({ error: 'Method not allowed.' }, 405);
-  }
-
+  let securityContext: BrowserSecurityContext | null = null;
   let replacementRequested = false;
   let replacementHandoffStarted = false;
   let replacementCheckoutCreated = false;
   let replacementCheckoutInvalidated = false;
 
   try {
-    let payload;
+    const ingress = prepareBrowserRequest(request);
+    securityContext = ingress.context;
+    if (ingress.response) return ingress.response;
 
-    try {
-      payload = await request.json();
-    } catch {
-      throw new CheckoutInputError('Invalid request body.');
+    requireJsonContentType(request);
+    rejectOversizeContentLength(request, MAXIMUM_CREATE_BODY_BYTES);
+    const networkIdentity = await getNetworkRateLimitIdentity(request);
+    await consumeRateLimits(
+      supabase,
+      getNetworkDimensions(networkIdentity, [
+        RATE_LIMIT_POLICIES.checkoutMinute,
+        RATE_LIMIT_POLICIES.checkoutHour,
+      ]),
+      { scope: 'network_pre_admission', checkoutRequestAdmitted: false }
+    );
+
+    const { payload, byteLength } = await readBoundedJsonWithSize(
+      request,
+      MAXIMUM_CREATE_BODY_BYTES
+    );
+    requireExactFields(payload, ALLOWED_FIELDS);
+
+    const checkoutOperation = cleanText(payload.checkout_operation, 20).toLowerCase();
+
+    if (checkoutOperation === 'resume' && byteLength > MAXIMUM_RESUME_BODY_BYTES) {
+      throw new HttpSecurityError('Request body is too large.', 413);
     }
 
-    if (!payload || typeof payload !== 'object') {
-      throw new CheckoutInputError('Invalid request body.');
-    }
+    const route = await shouldUseReservationCheckout(request, payload);
 
-    if (await shouldUseReservationCheckout(request, payload as Record<string, unknown>)) {
-      return await handleReservationCheckout(request, payload as Record<string, unknown>);
+    if (route.useReservationCheckout) {
+      if (route.attemptExists) {
+        const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
+        const checkoutRequestId = normalizeUuid(payload.checkout_request_id, 'Checkout request ID');
+        const [
+          { data: persistedIntent, error: persistedIntentError },
+          { data: attempt, error: attemptError },
+        ] = await Promise.all([
+          supabase
+            .from('checkout_intents')
+            .select('id')
+            .eq('checkout_attempt_id', checkoutAttemptId)
+            .eq('checkout_request_id', checkoutRequestId)
+            .maybeSingle(),
+          supabase
+            .from('checkout_attempts')
+            .select('admitted_checkout_request_id')
+            .eq('id', checkoutAttemptId)
+            .maybeSingle(),
+        ]);
+
+        if (persistedIntentError || attemptError) throw new RateLimitServiceError();
+
+        const requestAdmitted = Boolean(
+          persistedIntent || attempt?.admitted_checkout_request_id === checkoutRequestId
+        );
+        const attemptIdentity = await getAuthoritativeRateLimitIdentity(
+          'checkout-attempt',
+          checkoutAttemptId
+        );
+        const requestIdentity = await getAuthoritativeRateLimitIdentity(
+          'checkout-request',
+          `${checkoutAttemptId}:${checkoutRequestId}`
+        );
+
+        await consumeRateLimits(
+          supabase,
+          [
+            ...getAuthoritativeDimensions(attemptIdentity, [RATE_LIMIT_POLICIES.checkoutAttempt]),
+            ...getAuthoritativeDimensions(requestIdentity, [RATE_LIMIT_POLICIES.checkoutRequest]),
+          ],
+          {
+            scope: requestAdmitted ? 'persisted_operation' : 'existing_attempt_pre_admission',
+            checkoutRequestAdmitted: requestAdmitted,
+          }
+        );
+      }
+
+      return await handleReservationCheckout(request, payload, securityContext);
     }
 
     const cart = Array.isArray(payload.cart) ? payload.cart : [];
@@ -1864,7 +1972,7 @@ serve(async (request) => {
         typeof option.shipping_rate === 'string' ? option.shipping_rate : option.shipping_rate.id,
     }));
 
-    return jsonResponse({
+    return jsonResponse(securityContext, {
       client_secret: session.client_secret,
       checkout_session_id: session.id,
       checkout_intent_id: checkoutIntentId,
@@ -1890,12 +1998,23 @@ serve(async (request) => {
         : {}),
     });
   } catch (error) {
+    if (error instanceof RateLimitError && securityContext) {
+      return rateLimitResponse(securityContext, error);
+    }
+    if (error instanceof HttpSecurityError) return browserErrorResponse(error, securityContext);
+    if (error instanceof RateLimitServiceError && securityContext) {
+      return jsonResponse(securityContext, { error: error.message }, 503);
+    }
+
     if (error instanceof CheckoutInputError) {
-      return jsonResponse({ error: error.message }, 400);
+      return securityContext
+        ? jsonResponse(securityContext, { error: error.message }, 400)
+        : browserErrorResponse(error);
     }
 
     if (error instanceof DiscountEligibilityError) {
       return jsonResponse(
+        securityContext!,
         {
           error: error.message,
           discount_error: error.publicReason,
@@ -1908,7 +2027,7 @@ serve(async (request) => {
     }
 
     if (error instanceof CheckoutReplacementRequestError) {
-      return jsonResponse({ error: error.message }, error.status);
+      return jsonResponse(securityContext!, { error: error.message }, error.status);
     }
 
     if (error instanceof CheckoutReplacementConflictError) {
@@ -1917,6 +2036,7 @@ serve(async (request) => {
       });
 
       return jsonResponse(
+        securityContext!,
         {
           error: 'Checkout could not be replaced safely.',
           checkout_replacement_error: error.publicCode,
@@ -1927,14 +2047,18 @@ serve(async (request) => {
 
     if (error instanceof CheckoutProtocolRequestError) {
       return jsonResponse(
+        securityContext!,
         { error: error.message, checkout_orchestration_error: error.code },
         error.status
       );
     }
 
-    console.error('CREATE CHECKOUT SESSION ERROR:', error);
+    console.error('CREATE CHECKOUT SESSION ERROR:', {
+      error_name: error instanceof Error ? error.name : 'unknown',
+    });
 
     return jsonResponse(
+      securityContext!,
       {
         error: 'Unable to prepare Checkout.',
         ...(replacementRequested && !replacementHandoffStarted

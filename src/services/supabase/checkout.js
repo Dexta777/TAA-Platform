@@ -1,57 +1,7 @@
 import { supabase } from './client.js';
+import { CheckoutRequestError, createCheckoutInvocationError } from './checkout-errors.js';
 
-const SAFE_DISCOUNT_ERRORS = new Set([
-  'invalid_code',
-  'minimum_subtotal_not_met',
-  'account_required',
-  'not_eligible',
-  'discount_unavailable',
-]);
-const SAFE_REPLACEMENT_ERRORS = new Set([
-  'previous_checkout_usable',
-  'previous_checkout_unavailable',
-]);
-const SAFE_ORCHESTRATION_ERRORS = new Set([
-  'operation_in_progress',
-  'stripe_rate_limited',
-  'stripe_result_ambiguous',
-  'reconciliation_required',
-  'checkout_request_conflict',
-  'checkout_request_not_found',
-  'request_not_materialized',
-  'checkout_attempt_terminal',
-  'previous_checkout_usable',
-  'previous_checkout_unavailable',
-  'superseded',
-  'failed',
-  'compensated',
-]);
-
-export class CheckoutRequestError extends Error {
-  constructor(
-    message,
-    {
-      cause,
-      status = null,
-      discountError = null,
-      minimumSubtotalAmount = null,
-      checkoutReplacementError = null,
-      orchestrationError = null,
-      retryAfterMs = null,
-      retryable = false,
-    } = {}
-  ) {
-    super(message, { cause });
-    this.name = 'CheckoutRequestError';
-    this.status = status;
-    this.discountError = discountError;
-    this.minimumSubtotalAmount = minimumSubtotalAmount;
-    this.checkoutReplacementError = checkoutReplacementError;
-    this.orchestrationError = orchestrationError;
-    this.retryAfterMs = retryAfterMs;
-    this.retryable = retryable;
-  }
-}
+export { CheckoutRequestError } from './checkout-errors.js';
 
 function normalizeCartForCheckout(cart) {
   if (!Array.isArray(cart) || cart.length === 0) {
@@ -64,56 +14,16 @@ function normalizeCartForCheckout(cart) {
   }));
 }
 
-function getRetryAfterMs(payload) {
-  const seconds = Number(payload?.retry_after_seconds);
-
-  return Number.isFinite(seconds) && seconds >= 1 && seconds <= 30 ? seconds * 1000 : null;
-}
-
-function createInvocationError(payload, fallbackMessage, { cause, status = null } = {}) {
-  const message =
-    typeof payload?.error === 'string' && payload.error.trim()
-      ? payload.error.trim()
-      : fallbackMessage;
-  const discountError = SAFE_DISCOUNT_ERRORS.has(payload?.discount_error)
-    ? payload.discount_error
-    : null;
-  const minimumSubtotalAmount =
-    Number.isSafeInteger(payload?.minimum_subtotal_amount) && payload.minimum_subtotal_amount >= 0
-      ? payload.minimum_subtotal_amount
-      : null;
-  const checkoutReplacementError = SAFE_REPLACEMENT_ERRORS.has(payload?.checkout_replacement_error)
-    ? payload.checkout_replacement_error
-    : null;
-  const orchestrationError = SAFE_ORCHESTRATION_ERRORS.has(payload?.checkout_orchestration_error)
-    ? payload.checkout_orchestration_error
-    : null;
-  const retryAfterMs = getRetryAfterMs(payload);
-
-  return new CheckoutRequestError(message, {
-    cause,
-    status,
-    discountError,
-    minimumSubtotalAmount,
-    checkoutReplacementError,
-    orchestrationError,
-    retryAfterMs,
-    retryable:
-      orchestrationError === 'operation_in_progress' ||
-      orchestrationError === 'stripe_rate_limited' ||
-      orchestrationError === 'stripe_result_ambiguous',
-  });
-}
-
 async function getInvocationError(error, fallbackMessage) {
   const response = error?.context;
 
   if (response instanceof Response) {
     try {
       const payload = await response.clone().json();
-      return createInvocationError(payload, fallbackMessage, {
+      return createCheckoutInvocationError(payload, fallbackMessage, {
         cause: error,
         status: response.status,
+        response,
       });
     } catch {
       // The fallback below deliberately avoids exposing an unexpected response body.
@@ -138,7 +48,10 @@ async function invokeCheckoutFunction(functionName, body, fallbackMessage) {
   }
 
   if (data.checkout_orchestration_error === 'operation_in_progress') {
-    throw createInvocationError(data, fallbackMessage, { status: response?.status || 202 });
+    throw createCheckoutInvocationError(data, fallbackMessage, {
+      status: response?.status || 202,
+      response,
+    });
   }
 
   return data;

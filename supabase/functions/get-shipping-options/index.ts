@@ -5,12 +5,29 @@ import {
   getCanonicalShippingOptions,
   resolveCanonicalCart,
 } from '../_shared/checkout-catalog.ts';
+import {
+  browserErrorResponse,
+  type BrowserSecurityContext,
+  HttpSecurityError,
+  jsonResponse,
+  prepareBrowserRequest,
+  readBoundedJson,
+  rejectOversizeContentLength,
+  requireExactFields,
+  requireJsonContentType,
+} from '../_shared/http-security.ts';
+import {
+  consumeRateLimits,
+  getNetworkDimensions,
+  getNetworkRateLimitIdentity,
+  RATE_LIMIT_POLICIES,
+  RateLimitError,
+  RateLimitServiceError,
+  rateLimitResponse,
+} from '../_shared/rate-limit.ts';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-};
+const MAXIMUM_BODY_BYTES = 32 * 1024;
+const ALLOWED_FIELDS = new Set(['cart']);
 
 function requireEnvironment(name: string) {
   const value = Deno.env.get(name)?.trim();
@@ -26,34 +43,28 @@ const supabase = createClient(
   { auth: { persistSession: false, autoRefreshToken: false } }
 );
 
-function jsonResponse(payload: unknown, status = 200) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  });
-}
-
 serve(async (request) => {
-  if (request.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
-  }
-
-  if (request.method !== 'POST') {
-    return jsonResponse({ error: 'Method not allowed.' }, 405);
-  }
+  let context: BrowserSecurityContext | null = null;
 
   try {
-    let payload;
+    const ingress = prepareBrowserRequest(request);
+    context = ingress.context;
 
-    try {
-      payload = await request.json();
-    } catch {
-      throw new CheckoutInputError('Invalid request body.');
-    }
+    if (ingress.response) return ingress.response;
 
-    if (!payload || typeof payload !== 'object') {
-      throw new CheckoutInputError('Invalid request body.');
-    }
+    requireJsonContentType(request);
+    rejectOversizeContentLength(request, MAXIMUM_BODY_BYTES);
+    const networkIdentity = await getNetworkRateLimitIdentity(request);
+    await consumeRateLimits(
+      supabase,
+      getNetworkDimensions(networkIdentity, [
+        RATE_LIMIT_POLICIES.shippingMinute,
+        RATE_LIMIT_POLICIES.shippingTenMinutes,
+      ]),
+      { scope: 'shipping_network' }
+    );
+    const payload = await readBoundedJson(request, MAXIMUM_BODY_BYTES);
+    requireExactFields(payload, ALLOWED_FIELDS);
 
     const cart = Array.isArray(payload.cart) ? payload.cart : [];
     const items = await resolveCanonicalCart(supabase, cart);
@@ -66,7 +77,7 @@ serve(async (request) => {
 
     const options = await getCanonicalShippingOptions(supabase, totalWeightGrams);
 
-    return jsonResponse({
+    return jsonResponse(context, {
       subtotal,
       total_weight_grams: totalWeightGrams,
       currency: 'gbp',
@@ -77,12 +88,24 @@ serve(async (request) => {
       items,
     });
   } catch (error) {
-    console.error('GET SHIPPING OPTIONS ERROR:', error);
-
-    if (error instanceof CheckoutInputError) {
-      return jsonResponse({ error: error.message }, 400);
+    if (error instanceof RateLimitError && context) return rateLimitResponse(context, error);
+    if (error instanceof HttpSecurityError) return browserErrorResponse(error, context);
+    if (error instanceof RateLimitServiceError && context) {
+      return jsonResponse(context, { error: error.message }, 503);
     }
 
-    return jsonResponse({ error: 'Shipping options could not be loaded.' }, 500);
+    console.error('GET SHIPPING OPTIONS ERROR:', {
+      error_name: error instanceof Error ? error.name : 'unknown',
+    });
+
+    if (error instanceof CheckoutInputError) {
+      return context
+        ? jsonResponse(context, { error: error.message }, 400)
+        : browserErrorResponse(error);
+    }
+
+    return context
+      ? jsonResponse(context, { error: 'Shipping options could not be loaded.' }, 500)
+      : browserErrorResponse(error);
   }
 });

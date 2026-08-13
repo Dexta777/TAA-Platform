@@ -1,4 +1,5 @@
 const SAFE_RESET_ERRORS = new Set(['request_not_materialized', 'checkout_attempt_terminal']);
+const MAXIMUM_AUTOMATIC_RETRY_DELAY_MS = 12000;
 
 export function getCheckoutOperationMethodName(envelope) {
   return (
@@ -17,6 +18,10 @@ export async function invokeCheckoutOperationWithRetry(
       persistPhase('submitted');
       return await request();
     } catch (error) {
+      if (error?.status === 429 && error?.checkoutRequestAdmitted === false) {
+        persistPhase('prepared-locally');
+      }
+
       if (error?.orchestrationError === 'reconciliation_required') {
         persistPhase('reconciliation-pending');
         throw error;
@@ -24,8 +29,11 @@ export async function invokeCheckoutOperationWithRetry(
 
       if (!error?.retryable || attempt === maximumAttempts - 1) throw error;
 
-      persistPhase('processing');
       const retryDelay = error.retryAfterMs || Math.min(12000, 1500 * 2 ** attempt);
+
+      if (retryDelay > MAXIMUM_AUTOMATIC_RETRY_DELAY_MS) throw error;
+
+      if (error?.checkoutRequestAdmitted !== false) persistPhase('processing');
       await wait(retryDelay);
     }
   }

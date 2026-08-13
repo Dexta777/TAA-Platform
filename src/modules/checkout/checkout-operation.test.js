@@ -349,3 +349,117 @@ test('reconciliation-required recovery remains fail closed without ordinary retr
 
   assert.deepEqual(calls, []);
 });
+
+test('pre-admission 429 keeps the local request prepared and reuses its identity', async () => {
+  const phases = [];
+  const waits = [];
+  const requestIds = [];
+  const envelope = operationFixture('replacement');
+
+  await assert.rejects(() =>
+    requestCurrentCheckoutOperation({
+      envelope,
+      currentCommand: { replaceCheckoutSessionId: 'cs_test_a' },
+      createCheckoutSession: async (payload) => {
+        requestIds.push(payload.checkoutRequestId);
+        throw Object.assign(new Error('network budget exceeded'), {
+          status: 429,
+          orchestrationError: 'rate_limited',
+          checkoutRequestAdmitted: false,
+          retryable: true,
+          retryAfterMs: 1000,
+        });
+      },
+      resumeCheckoutSession: async () => assert.fail('a same-page retry retains its command'),
+      invokeWithRetry: (request) =>
+        invokeCheckoutOperationWithRetry(request, {
+          persistPhase: (phase) => phases.push(phase),
+          wait: async (duration) => waits.push(duration),
+        }),
+    })
+  );
+
+  assert.deepEqual(requestIds, Array(4).fill(envelope.currentOperation.checkoutRequestId));
+  assert.equal(phases.at(-1), 'prepared-locally');
+  assert.equal(phases.includes('processing'), false);
+  assert.deepEqual(waits, [1000, 1000, 1000]);
+});
+
+test('a long application cooldown stops automatic waiting and preserves manual retry', async () => {
+  const phases = [];
+  const waits = [];
+  const error = Object.assign(new Error('cooldown'), {
+    status: 429,
+    orchestrationError: 'rate_limited',
+    checkoutRequestAdmitted: true,
+    retryable: true,
+    retryAfterMs: 60000,
+  });
+
+  await assert.rejects(
+    () =>
+      invokeCheckoutOperationWithRetry(
+        async () => {
+          throw error;
+        },
+        {
+          persistPhase: (phase) => phases.push(phase),
+          wait: async (duration) => waits.push(duration),
+        }
+      ),
+    error
+  );
+
+  assert.deepEqual(phases, ['submitted']);
+  assert.deepEqual(waits, []);
+});
+
+test('persisted-operation 429 retries and resumes only the same replacement request', async () => {
+  const envelope = operationFixture('replacement');
+  const createCalls = [];
+
+  await assert.rejects(() =>
+    requestCurrentCheckoutOperation({
+      envelope,
+      currentCommand: { replaceCheckoutSessionId: 'cs_test_a' },
+      createCheckoutSession: async (payload) => {
+        createCalls.push(payload.checkoutRequestId);
+        throw Object.assign(new Error('request retry budget exceeded'), {
+          status: 429,
+          orchestrationError: 'rate_limited',
+          checkoutRequestAdmitted: true,
+          retryable: true,
+          retryAfterMs: 1000,
+        });
+      },
+      resumeCheckoutSession: async () => assert.fail('same-page retry retains its command'),
+      invokeWithRetry: (request) =>
+        invokeCheckoutOperationWithRetry(request, {
+          persistPhase: () => {},
+          wait: async () => {},
+        }),
+    })
+  );
+
+  const resumeCalls = [];
+
+  await requestCurrentCheckoutOperation({
+    envelope,
+    currentCommand: null,
+    invokeWithRetry: async (request) => request(),
+    createCheckoutSession: async () => assert.fail('reload must not create request C'),
+    resumeCheckoutSession: async (payload) => {
+      resumeCalls.push(payload);
+      return { checkout_protocol_version: 'reservation_v1' };
+    },
+  });
+
+  assert.deepEqual(createCalls, Array(4).fill(envelope.currentOperation.checkoutRequestId));
+  assert.deepEqual(resumeCalls, [
+    {
+      checkoutAttemptId: envelope.attempt.checkoutAttemptId,
+      checkoutAttemptToken: envelope.attempt.checkoutAttemptToken,
+      checkoutRequestId: envelope.currentOperation.checkoutRequestId,
+    },
+  ]);
+});
