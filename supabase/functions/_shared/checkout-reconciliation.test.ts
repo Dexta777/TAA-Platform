@@ -1,6 +1,7 @@
 import { assertEquals } from 'jsr:@std/assert@1';
 import type Stripe from 'npm:stripe@22.4.0';
 import {
+  createLifecycleLeaseId,
   getCheckoutDiscoveryWindow,
   selectDiscoveredCheckoutSession,
 } from './checkout-reconciliation.ts';
@@ -54,4 +55,17 @@ Deno.test('discovery window is bounded by creation, hard expiry, and margin', ()
     }),
     { gte: 1786528500, lte: 1786536300 }
   );
+});
+
+Deno.test('each reconciliation job receives independent lifecycle fencing authority', () => {
+  const generated = [
+    '51000000-0000-0000-0000-000000000001',
+    '51000000-0000-0000-0000-000000000002',
+  ];
+  const createUuid = () => generated.shift()!;
+  const firstLifecycleLeaseId = createLifecycleLeaseId(createUuid);
+  const secondLifecycleLeaseId = createLifecycleLeaseId(createUuid);
+
+  assertEquals(firstLifecycleLeaseId, '51000000-0000-0000-0000-000000000001');
+  assertEquals(secondLifecycleLeaseId, '51000000-0000-0000-0000-000000000002');
 });

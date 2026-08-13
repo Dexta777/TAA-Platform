@@ -8,11 +8,17 @@ import {
   validateAuthoritativeCheckoutSession,
   type CheckoutLifecycleCandidate,
 } from '../_shared/checkout-lifecycle.ts';
+import { resolvePaidActiveIntentReplacement } from '../_shared/checkout-paid-path.ts';
+import {
+  PaidCheckoutSessionValidationError,
+  validateAndSynchronizePaidCheckoutSession,
+} from '../_shared/checkout-paid-session.ts';
 import {
   callCheckoutRpc,
   loadPersistedCheckoutSnapshot,
 } from '../_shared/checkout-orchestration.ts';
 import {
+  createLifecycleLeaseId,
   getCheckoutDiscoveryWindow,
   selectDiscoveredCheckoutSession,
 } from '../_shared/checkout-reconciliation.ts';
@@ -184,6 +190,20 @@ async function loadLifecycleCandidate(intent: ReconciliationIntent) {
   };
 }
 
+async function loadLifecycleCandidateByIntentId(checkoutIntentId: string) {
+  const { data: intent, error } = await supabase
+    .from('checkout_intents')
+    .select(
+      'id, checkout_attempt_id, checkout_request_id, replaces_checkout_intent_id, checkout_protocol_version, predecessor_invalidated_at, orchestration_failure_code, stripe_checkout_session_id, stripe_session_params_hash, stripe_session_expires_at, payment_intent_id, currency, subtotal_amount, created_at'
+    )
+    .eq('id', checkoutIntentId)
+    .maybeSingle();
+
+  if (error || !intent || intent.checkout_protocol_version !== 'reservation_v1') return null;
+
+  return (await loadLifecycleCandidate(intent as ReconciliationIntent)).candidate;
+}
+
 async function discoverCheckoutSession(
   intent: ReconciliationIntent,
   hardExpiresAt: string,
@@ -322,94 +342,6 @@ async function discoverCheckoutSession(
   return { outcome: 'recorded' as const, session: recoveredSession };
 }
 
-async function synchronizePaidCheckoutSession(session: Stripe.Checkout.Session) {
-  const checkoutIntentId = session.metadata?.checkout_intent_id;
-  const shippingRate = session.shipping_cost?.shipping_rate;
-  const expandedRate =
-    typeof shippingRate === 'string'
-      ? await stripe.shippingRates.retrieve(shippingRate)
-      : shippingRate;
-  const shippingDetails = session.collected_information?.shipping_details;
-  const customerDetails = session.customer_details;
-
-  if (
-    !expandedRate ||
-    !checkoutIntentId ||
-    !shippingDetails?.address ||
-    !customerDetails?.email ||
-    session.amount_subtotal === null ||
-    session.amount_total === null
-  ) {
-    throw new Error('Paid Checkout Session is missing fulfillment details.');
-  }
-
-  const { data: option, error: optionError } = await supabase
-    .from('checkout_intent_shipping_options')
-    .select('shipping_method_id, shipping_rate_id, display_name, amount, currency')
-    .eq('checkout_intent_id', checkoutIntentId)
-    .eq('stripe_shipping_rate_id', expandedRate.id)
-    .maybeSingle();
-
-  if (optionError || !option || option.currency !== session.currency) {
-    throw new Error('Paid Checkout Session shipping selection is invalid.');
-  }
-
-  const shippingAmount = session.shipping_cost?.amount_total ?? 0;
-
-  if (
-    session.amount_subtotal + shippingAmount - (session.total_details?.amount_discount ?? 0) !==
-    session.amount_total
-  ) {
-    throw new Error('Paid Checkout Session totals are inconsistent.');
-  }
-
-  const toAddress = (address: Stripe.Address, name: string | null) => {
-    const names = String(name || '')
-      .trim()
-      .split(/\s+/);
-
-    return {
-      first_name: names.shift() || '',
-      last_name: names.join(' '),
-      company: '',
-      address_1: address.line1 || '',
-      address_2: address.line2 || '',
-      city: address.city || '',
-      county: address.state || '',
-      postcode: address.postal_code || '',
-      country: address.country || 'GB',
-    };
-  };
-
-  const shippingAddress = toAddress(shippingDetails.address, shippingDetails.name);
-  const billingAddress = customerDetails.address
-    ? toAddress(customerDetails.address, customerDetails.name)
-    : shippingAddress;
-  const { error } = await supabase
-    .from('checkout_intents')
-    .update({
-      payment_intent_id: getResourceId(session.payment_intent),
-      stripe_customer_id: getResourceId(session.customer),
-      customer_email: customerDetails.email,
-      shipping_name: shippingDetails.name,
-      shipping_phone: customerDetails.phone,
-      shipping_address: shippingAddress,
-      billing_name: customerDetails.name || shippingDetails.name,
-      billing_address: billingAddress,
-      subtotal_amount: session.amount_subtotal,
-      shipping_amount: shippingAmount,
-      total_amount: session.amount_total,
-      currency: session.currency,
-      shipping_method_name: option.display_name,
-      shipping_method_id: option.shipping_method_id,
-      shipping_rate_id: option.shipping_rate_id,
-    })
-    .eq('id', checkoutIntentId)
-    .eq('stripe_checkout_session_id', session.id);
-
-  if (error) throw new Error('Paid Checkout Session could not be synchronized.');
-}
-
 async function resolvePaidPredecessor(
   intent: ReconciliationIntent,
   candidate: CheckoutLifecycleCandidate,
@@ -479,9 +411,43 @@ async function resolvePaidPredecessor(
   return true;
 }
 
+async function resolvePaidActiveIntentPath(
+  intent: ReconciliationIntent,
+  candidate: CheckoutLifecycleCandidate
+) {
+  return await resolvePaidActiveIntentReplacement(candidate, {
+    loadCandidate: loadLifecycleCandidateByIntentId,
+    retrieveSession: async (checkoutSessionId) =>
+      await stripe.checkout.sessions.retrieve(checkoutSessionId, {
+        expand: ['payment_intent', 'shipping_cost.shipping_rate'],
+      }),
+    expireSession: async (session, replacement) => {
+      await stripe.checkout.sessions.expire(
+        session.id,
+        {},
+        {
+          idempotencyKey: getStripeIdempotencyKeys(
+            replacement.checkout_attempt_id,
+            replacement.checkout_request_id
+          ).expireNew,
+        }
+      );
+    },
+    terminalizeReplacement: async (checkoutSessionId) => {
+      await callCheckoutRpc(supabase, 'transition_checkout_session_terminal', {
+        p_checkout_session_id: checkoutSessionId,
+        p_reason: 'expired_unpaid',
+      });
+    },
+    recordConflict: async (reason, paymentIntentId) => {
+      await recordIncident(intent, 'paid_path_conflict', reason, paymentIntentId);
+    },
+  });
+}
+
 async function processKnownSession(
   intent: ReconciliationIntent,
-  workerLeaseId: string,
+  lifecycleLeaseId: string,
   reservationExpiresAt: string
 ) {
   let session = await stripe.checkout.sessions.retrieve(intent.stripe_checkout_session_id!, {
@@ -515,18 +481,29 @@ async function processKnownSession(
   if (action === 'finalize') {
     if (
       isPaidInFlightReplacement(lifecycle.candidate) &&
-      !(await resolvePaidPredecessor(intent, lifecycle.candidate, workerLeaseId))
+      !(await resolvePaidPredecessor(intent, lifecycle.candidate, lifecycleLeaseId))
     ) {
       return 'manual_review' as const;
     }
 
-    await synchronizePaidCheckoutSession(session);
+    const resolvedActiveCandidate = await resolvePaidActiveIntentPath(intent, lifecycle.candidate);
+
+    if (!resolvedActiveCandidate) return 'manual_review' as const;
+
     const paymentIntent =
       typeof session.payment_intent === 'string'
         ? await stripe.paymentIntents.retrieve(session.payment_intent, {
             expand: ['payment_method'],
           })
         : session.payment_intent;
+    await validateAndSynchronizePaidCheckoutSession({
+      supabase,
+      session,
+      paymentIntent,
+      candidate: resolvedActiveCandidate,
+      retrieveShippingRate: async (shippingRateId) =>
+        await stripe.shippingRates.retrieve(shippingRateId),
+    });
     const paymentMethod =
       paymentIntent?.payment_method && typeof paymentIntent.payment_method !== 'string'
         ? paymentIntent.payment_method
@@ -577,11 +554,12 @@ async function processKnownSession(
   return 'manual_review' as const;
 }
 
-async function processJob(job: ReconciliationJob, workerLeaseId: string) {
+async function processJob(job: ReconciliationJob, queueWorkerLeaseId: string) {
+  const lifecycleLeaseId = createLifecycleLeaseId();
   const intent = await loadReconciliationIntent(job);
 
   if (!intent) {
-    await completeJob(job, workerLeaseId, 'manual_review', 'reconciliation_intent_missing');
+    await completeJob(job, queueWorkerLeaseId, 'manual_review', 'reconciliation_intent_missing');
     return;
   }
 
@@ -592,12 +570,12 @@ async function processJob(job: ReconciliationJob, workerLeaseId: string) {
       const discovery = await discoverCheckoutSession(
         intent,
         lifecycle.hardExpiresAt,
-        workerLeaseId
+        lifecycleLeaseId
       );
 
       await completeJob(
         job,
-        workerLeaseId,
+        queueWorkerLeaseId,
         discovery.outcome === 'resolved'
           ? 'resolved'
           : discovery.outcome === 'manual_review'
@@ -610,14 +588,17 @@ async function processJob(job: ReconciliationJob, workerLeaseId: string) {
 
     const outcome = await processKnownSession(
       intent,
-      workerLeaseId,
+      lifecycleLeaseId,
       lifecycle.reservationExpiresAt
     );
-    await completeJob(job, workerLeaseId, outcome, null);
+    await completeJob(job, queueWorkerLeaseId, outcome, null);
   } catch (error) {
-    if (error instanceof CheckoutLifecycleValidationError) {
+    if (
+      error instanceof CheckoutLifecycleValidationError ||
+      error instanceof PaidCheckoutSessionValidationError
+    ) {
       await recordIncident(intent, 'stripe_session_match_conflict', error.code);
-      await completeJob(job, workerLeaseId, 'manual_review', error.code);
+      await completeJob(job, queueWorkerLeaseId, 'manual_review', error.code);
       return;
     }
 
@@ -627,7 +608,7 @@ async function processJob(job: ReconciliationJob, workerLeaseId: string) {
       checkout_intent_id: intent.id,
       error_name: error instanceof Error ? error.name : 'unknown',
     });
-    await completeJob(job, workerLeaseId, 'retry', 'reconciliation_retry');
+    await completeJob(job, queueWorkerLeaseId, 'retry', 'reconciliation_retry');
   }
 }
 
@@ -635,9 +616,9 @@ serve(async (request) => {
   if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
   if (!authorized(request)) return new Response('Unauthorized', { status: 401 });
 
-  const workerLeaseId = crypto.randomUUID();
+  const queueWorkerLeaseId = crypto.randomUUID();
   const { data, error } = await supabase.rpc('claim_checkout_reconciliation_jobs', {
-    p_worker_lease_id: workerLeaseId,
+    p_worker_lease_id: queueWorkerLeaseId,
     p_batch_size: 25,
   });
 
@@ -649,7 +630,9 @@ serve(async (request) => {
   const jobs = (data || []) as ReconciliationJob[];
 
   for (let index = 0; index < jobs.length; index += 5) {
-    await Promise.all(jobs.slice(index, index + 5).map((job) => processJob(job, workerLeaseId)));
+    await Promise.all(
+      jobs.slice(index, index + 5).map((job) => processJob(job, queueWorkerLeaseId))
+    );
   }
 
   return Response.json({ claimed: jobs.length });

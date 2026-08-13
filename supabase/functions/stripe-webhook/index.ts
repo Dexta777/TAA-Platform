@@ -13,6 +13,11 @@ import {
   validateAuthoritativeCheckoutSession,
   type CheckoutLifecycleCandidate,
 } from '../_shared/checkout-lifecycle.ts';
+import {
+  PaidCheckoutSessionValidationError,
+  validateAndSynchronizePaidCheckoutSession,
+} from '../_shared/checkout-paid-session.ts';
+import { resolvePaidActiveIntentReplacement } from '../_shared/checkout-paid-path.ts';
 import { callCheckoutRpc } from '../_shared/checkout-orchestration.ts';
 import { getStripeIdempotencyKeys } from '../_shared/checkout-protocol.ts';
 
@@ -508,13 +513,13 @@ async function fulfillCheckoutSession(checkoutSessionId: string) {
   });
 }
 
-async function loadCheckoutLifecycleCandidate(checkoutSessionId: string) {
+async function loadCheckoutLifecycleCandidateByIntentId(checkoutIntentId: string) {
   const { data: intent, error: intentError } = await supabase
     .from('checkout_intents')
     .select(
       'id, checkout_attempt_id, checkout_request_id, replaces_checkout_intent_id, checkout_protocol_version, predecessor_invalidated_at, stripe_checkout_session_id, payment_intent_id, currency, subtotal_amount'
     )
-    .eq('stripe_checkout_session_id', checkoutSessionId)
+    .eq('id', checkoutIntentId)
     .maybeSingle();
 
   if (intentError) throw new Error('Checkout lifecycle candidate could not be loaded.');
@@ -531,6 +536,19 @@ async function loadCheckoutLifecycleCandidate(checkoutSessionId: string) {
   }
 
   return { ...intent, ...attempt } as CheckoutLifecycleCandidate;
+}
+
+async function loadCheckoutLifecycleCandidate(checkoutSessionId: string) {
+  const { data: intent, error } = await supabase
+    .from('checkout_intents')
+    .select('id, checkout_protocol_version')
+    .eq('stripe_checkout_session_id', checkoutSessionId)
+    .maybeSingle();
+
+  if (error) throw new Error('Checkout lifecycle candidate could not be located.');
+  if (!intent || intent.checkout_protocol_version !== 'reservation_v1') return null;
+
+  return await loadCheckoutLifecycleCandidateByIntentId(intent.id);
 }
 
 async function recordLifecycleIncident({
@@ -641,6 +659,42 @@ async function resolvePaidInFlightPredecessor(candidate: CheckoutLifecycleCandid
   return await loadCheckoutLifecycleCandidate(candidate.stripe_checkout_session_id);
 }
 
+async function resolvePaidActiveIntentPath(candidate: CheckoutLifecycleCandidate) {
+  return await resolvePaidActiveIntentReplacement(candidate, {
+    loadCandidate: loadCheckoutLifecycleCandidateByIntentId,
+    retrieveSession: async (checkoutSessionId) =>
+      await stripe.checkout.sessions.retrieve(checkoutSessionId, {
+        expand: ['payment_intent', 'shipping_cost.shipping_rate'],
+      }),
+    expireSession: async (session, replacement) => {
+      await stripe.checkout.sessions.expire(
+        session.id,
+        {},
+        {
+          idempotencyKey: getStripeIdempotencyKeys(
+            replacement.checkout_attempt_id,
+            replacement.checkout_request_id
+          ).expireNew,
+        }
+      );
+    },
+    terminalizeReplacement: async (checkoutSessionId) => {
+      await callCheckoutRpc(supabase, 'transition_checkout_session_terminal', {
+        p_checkout_session_id: checkoutSessionId,
+        p_reason: 'expired_unpaid',
+      });
+    },
+    recordConflict: async (reason, paymentIntentId) => {
+      await recordLifecycleIncident({
+        candidate,
+        incidentType: 'paid_path_conflict',
+        paymentIntentId,
+        reason,
+      });
+    },
+  });
+}
+
 async function reconcileReservationCheckoutSession(checkoutSessionId: string, eventType: string) {
   let candidate = await loadCheckoutLifecycleCandidate(checkoutSessionId);
 
@@ -679,13 +733,44 @@ async function reconcileReservationCheckoutSession(checkoutSessionId: string, ev
       validateAuthoritativeCheckoutSession(session, candidate, { requireCurrentPointer: false });
     }
 
+    const resolvedActiveCandidate = await resolvePaidActiveIntentPath(candidate);
+
+    if (!resolvedActiveCandidate) {
+      return { lifecycleOutcome: 'manual_review_required', safeTerminal: false };
+    }
+
+    candidate = resolvedActiveCandidate;
+
     const paymentIntent =
       typeof session.payment_intent === 'string'
         ? await stripe.paymentIntents.retrieve(session.payment_intent, {
             expand: ['payment_method'],
           })
         : session.payment_intent;
-    const identifiers = await updateCheckoutIntentFromSession(session, paymentIntent);
+    let identifiers: { paymentIntentId: string | null; stripeCustomerId: string | null };
+
+    try {
+      identifiers = await validateAndSynchronizePaidCheckoutSession({
+        supabase,
+        session,
+        paymentIntent,
+        candidate,
+        retrieveShippingRate: async (shippingRateId) =>
+          await stripe.shippingRates.retrieve(shippingRateId),
+      });
+    } catch (error) {
+      if (!(error instanceof PaidCheckoutSessionValidationError)) throw error;
+
+      await recordLifecycleIncident({
+        candidate,
+        incidentType: 'stripe_session_match_conflict',
+        paymentIntentId: getResourceId(session.payment_intent),
+        reason: error.code,
+      });
+
+      return { lifecycleOutcome: 'manual_review_required', safeTerminal: false };
+    }
+
     const paymentDetails = await getPaymentDetails(paymentIntent);
     const result = await finalizeOrder({
       checkoutSessionId: session.id,
@@ -710,7 +795,10 @@ async function reconcileReservationCheckoutSession(checkoutSessionId: string, ev
       }
     );
 
-    return { lifecycleOutcome: result?.lifecycle_outcome, safeTerminal: true };
+    return {
+      lifecycleOutcome: result?.lifecycle_outcome,
+      safeTerminal: result?.lifecycle_outcome !== 'reconciliation_required',
+    };
   }
 
   if (action === 'payment_pending') {
@@ -736,7 +824,10 @@ async function reconcileReservationCheckoutSession(checkoutSessionId: string, ev
       }
     );
 
-    return { lifecycleOutcome: result?.lifecycle_outcome, safeTerminal: true };
+    return {
+      lifecycleOutcome: result?.lifecycle_outcome,
+      safeTerminal: result?.lifecycle_outcome !== 'reconciliation_required',
+    };
   }
 
   if (action === 'retain') {

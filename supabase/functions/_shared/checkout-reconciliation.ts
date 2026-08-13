@@ -7,6 +7,10 @@ export type CheckoutDiscoveryIdentity = {
   checkoutIntentId: string;
 };
 
+export function createLifecycleLeaseId(createUuid: () => string = () => crypto.randomUUID()) {
+  return createUuid();
+}
+
 export function checkoutSessionMatchesDiscoveryIdentity(
   session: Stripe.Checkout.Session,
   identity: CheckoutDiscoveryIdentity
