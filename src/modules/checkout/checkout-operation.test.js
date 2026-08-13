@@ -68,6 +68,7 @@ test('active v1 and replacement recovery resume before any mutable shipping look
         calls.push('fresh-shipping');
         throw new Error('Mutable shipping configuration changed.');
       },
+      exposeManualRetry: async () => calls.push('retry'),
     });
 
     assert.equal(outcome, 'installed');
@@ -109,6 +110,7 @@ test('prepared-local not-found and terminal reset load fresh shipping only after
         return true;
       },
       loadFreshShippingOptions: async () => calls.push('fresh-shipping'),
+      exposeManualRetry: async () => calls.push('retry'),
     });
 
     assert.equal(outcome, 'fresh');
@@ -240,4 +242,110 @@ test('automatic retry exhaustion leaves the same replacement request available f
   );
 
   assert.deepEqual(calls, Array(4).fill(envelope.currentOperation.checkoutRequestId));
+});
+
+test('reload retry exhaustion exposes manual resume without fresh shipping or request C', async () => {
+  const envelope = operationFixture('replacement');
+  const originalOperation = structuredClone(envelope.currentOperation);
+  const calls = [];
+  let retryAvailable = false;
+
+  const outcome = await recoverCheckoutOperationBeforeFreshState({
+    operation: envelope.currentOperation,
+    requestOperation: () =>
+      requestCurrentCheckoutOperation({
+        envelope,
+        currentCommand: null,
+        createCheckoutSession: async () => calls.push('create-c'),
+        resumeCheckoutSession: async (payload) => {
+          calls.push(['resume-b', payload]);
+          throw Object.assign(new Error('still processing'), {
+            orchestrationError: 'operation_in_progress',
+            retryable: true,
+          });
+        },
+        invokeWithRetry: (request) =>
+          invokeCheckoutOperationWithRetry(request, {
+            persistPhase: () => {},
+            wait: async () => {},
+          }),
+      }),
+    installPreparedCheckout: async () => calls.push('install'),
+    navigateToConfirmation: () => calls.push('confirmation'),
+    discardLocalOperation: async () => calls.push('discard'),
+    resetTerminalOperation: async () => {
+      calls.push('reset');
+      return true;
+    },
+    loadFreshShippingOptions: async () => calls.push('fresh-shipping'),
+    exposeManualRetry: async () => {
+      retryAvailable = true;
+      calls.push('retry-available');
+    },
+  });
+
+  assert.equal(outcome, 'retry');
+  assert.equal(retryAvailable, true);
+  assert.deepEqual(envelope.currentOperation, originalOperation);
+  assert.equal(calls.filter((entry) => Array.isArray(entry) && entry[0] === 'resume-b').length, 4);
+  assert.equal(calls.includes('fresh-shipping'), false);
+  assert.equal(calls.includes('reset'), false);
+  assert.equal(calls.includes('create-c'), false);
+
+  calls.length = 0;
+
+  await assert.rejects(() =>
+    requestCurrentCheckoutOperation({
+      envelope,
+      currentCommand: null,
+      invokeWithRetry: async (request) => request(),
+      createCheckoutSession: async () => calls.push('create-c'),
+      resumeCheckoutSession: async (payload) => {
+        calls.push(['manual-resume-b', payload]);
+        throw new Error('manual retry fixture');
+      },
+    })
+  );
+
+  assert.deepEqual(calls, [
+    [
+      'manual-resume-b',
+      {
+        checkoutAttemptId: envelope.attempt.checkoutAttemptId,
+        checkoutAttemptToken: envelope.attempt.checkoutAttemptToken,
+        checkoutRequestId: envelope.currentOperation.checkoutRequestId,
+      },
+    ],
+  ]);
+});
+
+test('reconciliation-required recovery remains fail closed without ordinary retry availability', async () => {
+  const envelope = operationFixture('replacement');
+  const calls = [];
+  const error = Object.assign(new Error('reconciliation required'), {
+    orchestrationError: 'reconciliation_required',
+    retryable: true,
+  });
+
+  await assert.rejects(
+    () =>
+      recoverCheckoutOperationBeforeFreshState({
+        operation: envelope.currentOperation,
+        requestOperation: async () => {
+          throw error;
+        },
+        installPreparedCheckout: async () => calls.push('install'),
+        navigateToConfirmation: () => calls.push('confirmation'),
+        discardLocalOperation: async () => calls.push('discard'),
+        resetTerminalOperation: async () => {
+          calls.push('reset');
+          return true;
+        },
+        loadFreshShippingOptions: async () => calls.push('fresh-shipping'),
+        exposeManualRetry: async () => calls.push('retry-available'),
+      }),
+    error
+  );
+
+  assert.deepEqual(calls, []);
 });

@@ -944,6 +944,13 @@ export async function initCheckout() {
           setCheckoutControlsBusy(false);
           setPayButton('Select Shipping', true);
         },
+        exposeManualRetry: async (error) => {
+          console.error('Checkout recovery retry budget exhausted:', error);
+          showError(error.message || 'Payment recovery is still processing.');
+          state.retryAvailable = true;
+          setCheckoutControlsBusy(false);
+          setPayButton('Retry Payment', false);
+        },
       });
     } else {
       await loadCurrentCartShippingOptions();

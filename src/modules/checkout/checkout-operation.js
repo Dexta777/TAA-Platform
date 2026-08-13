@@ -95,6 +95,7 @@ export async function recoverCheckoutOperationBeforeFreshState({
   discardLocalOperation,
   resetTerminalOperation,
   loadFreshShippingOptions,
+  exposeManualRetry,
 }) {
   try {
     const result = await requestOperation();
@@ -121,6 +122,11 @@ export async function recoverCheckoutOperationBeforeFreshState({
       if (resetCompleted) await loadFreshShippingOptions();
 
       return resetCompleted ? 'fresh' : 'confirmation';
+    }
+
+    if (error?.retryable && error?.orchestrationError !== 'reconciliation_required') {
+      await exposeManualRetry(error);
+      return 'retry';
     }
 
     throw error;
