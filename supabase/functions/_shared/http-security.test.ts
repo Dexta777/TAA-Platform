@@ -1,8 +1,9 @@
-import { assert, assertEquals, assertRejects } from 'jsr:@std/assert@1';
+import { assert, assertEquals, assertRejects, assertThrows } from 'jsr:@std/assert@1';
 import {
   HttpSecurityError,
   browserErrorResponse,
   getConfiguredBrowserApiKeys,
+  getConfiguredBrowserOrigins,
   prepareBrowserRequest,
   readBoundedJson,
 } from './http-security.ts';
@@ -27,6 +28,50 @@ const configuration = {
   configuredOrigins: [allowedOrigin],
   configuredApiKeys: [browserApiKey],
 };
+
+Deno.test('a single exact configured browser origin is canonical and allowed', () => {
+  assertEquals(getConfiguredBrowserOrigins(allowedOrigin), [allowedOrigin]);
+  assertEquals(
+    prepareBrowserRequest(browserRequest(), configuration).context.origin,
+    allowedOrigin
+  );
+});
+
+Deno.test('duplicate identical configured origins are deduplicated before matching', () => {
+  assertEquals(getConfiguredBrowserOrigins(`${allowedOrigin}, ${allowedOrigin}`), [allowedOrigin]);
+
+  const result = prepareBrowserRequest(browserRequest(), {
+    ...configuration,
+    configuredOrigins: [allowedOrigin, allowedOrigin],
+  });
+
+  assertEquals(result.context.origin, allowedOrigin);
+});
+
+Deno.test('multiple distinct exact configured origins remain independently allowed', () => {
+  const stagingOrigin = 'https://staging.theanimalalchemist.com';
+  const configuredOrigins = getConfiguredBrowserOrigins(
+    JSON.stringify([allowedOrigin, stagingOrigin])
+  );
+  const stagingRequest = browserRequest('POST', '{}', { origin: stagingOrigin });
+
+  assertEquals(configuredOrigins, [allowedOrigin, stagingOrigin]);
+  assertEquals(
+    prepareBrowserRequest(stagingRequest, {
+      configuredOrigins,
+      configuredApiKeys: [browserApiKey],
+    }).context.origin,
+    stagingOrigin
+  );
+});
+
+Deno.test('malformed configured origins remain rejected', () => {
+  assertThrows(
+    () => getConfiguredBrowserOrigins('https://www.theanimalalchemist.com/path'),
+    Error,
+    'TAA_BROWSER_ALLOWED_ORIGINS contains an invalid exact origin.'
+  );
+});
 
 Deno.test('allowed browser requests reflect exact no-store CORS without credentials', () => {
   const result = prepareBrowserRequest(browserRequest(), configuration);

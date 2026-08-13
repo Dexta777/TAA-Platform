@@ -54,24 +54,30 @@ function parseConfiguredValues(value: string | undefined) {
   return trimmed.split(',');
 }
 
-export function getConfiguredBrowserOrigins(value = Deno.env.get('TAA_BROWSER_ALLOWED_ORIGINS')) {
-  const origins = parseConfiguredValues(value)
+function canonicalizeBrowserOrigins(origins: readonly string[]) {
+  const canonicalOrigins = origins
     .map((origin) => origin.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((origin) => {
+      const url = new URL(origin);
+      const canonicalOrigin = url.origin;
 
-  if (origins.length === 0) {
+      if (canonicalOrigin !== origin || !['http:', 'https:'].includes(url.protocol)) {
+        throw new Error('TAA_BROWSER_ALLOWED_ORIGINS contains an invalid exact origin.');
+      }
+
+      return canonicalOrigin;
+    });
+
+  if (canonicalOrigins.length === 0) {
     throw new Error('TAA_BROWSER_ALLOWED_ORIGINS is not configured.');
   }
 
-  return origins.map((origin) => {
-    const url = new URL(origin);
+  return [...new Set(canonicalOrigins)];
+}
 
-    if (url.origin !== origin || !['http:', 'https:'].includes(url.protocol)) {
-      throw new Error('TAA_BROWSER_ALLOWED_ORIGINS contains an invalid exact origin.');
-    }
-
-    return origin;
-  });
+export function getConfiguredBrowserOrigins(value = Deno.env.get('TAA_BROWSER_ALLOWED_ORIGINS')) {
+  return canonicalizeBrowserOrigins(parseConfiguredValues(value));
 }
 
 export function getConfiguredBrowserApiKeys({
@@ -113,7 +119,9 @@ function requireAllowedOrigin(request: Request, configuredOrigins?: string[]) {
     throw new HttpSecurityError('Browser origin is not allowed.', 403);
   }
 
-  const allowedOrigins = configuredOrigins || getConfiguredBrowserOrigins();
+  const allowedOrigins = configuredOrigins
+    ? canonicalizeBrowserOrigins(configuredOrigins)
+    : getConfiguredBrowserOrigins();
 
   if (!constantTimeMatchesAny(origin, allowedOrigins)) {
     throw new HttpSecurityError('Browser origin is not allowed.', 403);

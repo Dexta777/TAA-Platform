@@ -69,15 +69,21 @@ account ownership and checkout capabilities remain mandatory.
 
 ## Private Klaviyo catalogue-sync cutover
 
-Use this security-first order; never put the token in Git, SQL, logs, `sync_logs`, or trigger data:
+Use this security-first order; never put the token or environment-specific project URL in Git, SQL,
+logs, `sync_logs`, or trigger data:
 
 1. Generate one random purpose-specific secret and provision the same value as the Edge secret
    `TAA_KLAVIYO_CATALOG_SYNC_SECRET` and Vault secret `taa_klaviyo_catalog_sync_secret`.
-2. Deploy `sync-klaviyo-catalog` requiring `x-taa-internal-token`. Old unauthenticated `pg_net`
+2. Provision the environment's origin-only Supabase project base URL as the Vault secret
+   `taa_supabase_functions_url`, without `/functions/v1`, a path, query, or fragment. Hosted values
+   must use HTTPS; local development may use an explicitly allowed local host. One trailing slash
+   is accepted and removed by the trigger.
+3. Deploy `sync-klaviyo-catalog` requiring `x-taa-internal-token`. Old unauthenticated `pg_net`
    calls may temporarily fail at this point, which is safer than accepting unauthenticated writes.
-3. Apply the additive Phase 6A migration so the trigger reads Vault and sends the token.
-4. Verify authenticated product and variant trigger sync in staging.
-5. Verify missing and wrong tokens have no provider or database side effects.
+4. Apply the additive Phase 6A hardening migration only after both Vault values exist. The trigger
+   reads the environment URL and token from Vault, then constructs the catalogue-sync function URL.
+5. Verify authenticated product and variant trigger sync in staging.
+6. Verify missing and wrong tokens have no provider or database side effects.
 
 Missing Vault configuration, authentication failure, queue failure, or provider failure must never
 abort the underlying product mutation.

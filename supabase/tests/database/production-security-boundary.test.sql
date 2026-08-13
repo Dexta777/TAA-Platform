@@ -145,9 +145,14 @@ SELECT lives_ok(
       'phase-6a-test-token',
       'taa_klaviyo_catalog_sync_secret',
       'Phase 6A pgTAP fixture'
-    )
+    );
+    SELECT vault.create_secret(
+      'https://phase-6a.test',
+      'taa_supabase_functions_url',
+      'Phase 6A pgTAP fixture'
+    );
   $$,
-  'the local Vault fixture can provision the named catalogue-sync token'
+  'the local Vault fixture can provision named catalogue-sync configuration'
 );
 
 SELECT lives_ok(
@@ -170,8 +175,7 @@ SELECT ok(
   EXISTS (
     SELECT 1
     FROM net.http_request_queue AS queued
-    WHERE queued.url =
-      'https://zxmywtmjvfjgdjcstgtn.supabase.co/functions/v1/sync-klaviyo-catalog'
+    WHERE queued.url = 'https://phase-6a.test/functions/v1/sync-klaviyo-catalog'
       AND queued.headers ->> 'x-taa-internal-token' = 'phase-6a-test-token'
       AND convert_from(queued.body, 'UTF8')::jsonb = jsonb_build_object(
         'source_table', 'products',
