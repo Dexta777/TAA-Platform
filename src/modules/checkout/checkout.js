@@ -29,6 +29,12 @@ import {
   setCheckoutOperationPhase,
 } from './checkout-attempt.js';
 import { createCheckoutDiscount } from './checkout-discount.js';
+import {
+  getCheckoutOperationMethodName,
+  invokeCheckoutOperationWithRetry,
+  recoverCheckoutOperationBeforeFreshState,
+  requestCurrentCheckoutOperation,
+} from './checkout-operation.js';
 import { createCheckoutShipping } from './checkout-shipping.js';
 import { createCheckoutSummary } from './checkout-summary.js';
 import { validateCheckout } from './checkout-validation.js';
@@ -375,34 +381,18 @@ export async function initCheckout() {
   }
 
   async function invokePreparedCheckout(request) {
-    const maximumAttempts = 4;
-
-    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
-      try {
-        persistOperationPhase('submitted');
-        return await request();
-      } catch (error) {
-        if (error?.orchestrationError === 'reconciliation_required') {
-          persistOperationPhase('reconciliation-pending');
-          throw error;
-        }
-
-        if (!error?.retryable || attempt === maximumAttempts - 1) throw error;
-
-        persistOperationPhase('processing');
-        const retryDelay = error.retryAfterMs || Math.min(12000, 1500 * 2 ** attempt);
-        await delay(retryDelay);
-      }
-    }
-
-    throw new Error('Payment preparation could not be completed.');
+    return invokeCheckoutOperationWithRetry(request, {
+      persistPhase: persistOperationPhase,
+      wait: delay,
+    });
   }
 
   async function requestPreparedCheckout(methodName, discountCode, replaceCurrentCheckout) {
     await assertCurrentCart();
-    const addressData = getCheckoutAddressData(root);
 
     if (state.protocolMode === 'legacy') {
+      const addressData = getCheckoutAddressData(root);
+
       return createCheckoutSession({
         cart,
         shippingMethodName: methodName,
@@ -422,6 +412,8 @@ export async function initCheckout() {
     }
 
     if (!checkoutEnvelope.currentOperation) {
+      const addressData = getCheckoutAddressData(root);
+
       checkoutEnvelope = beginCheckoutOperation(
         checkoutEnvelope,
         replaceCurrentCheckout ? 'replacement' : 'initial',
@@ -442,27 +434,13 @@ export async function initCheckout() {
       };
     }
 
-    const operation = checkoutEnvelope.currentOperation;
-    const attempt = checkoutEnvelope.attempt;
-
-    if (!currentCommand) {
-      return invokePreparedCheckout(() =>
-        resumeCheckoutSession({
-          checkoutAttemptId: attempt.checkoutAttemptId,
-          checkoutAttemptToken: attempt.checkoutAttemptToken,
-          checkoutRequestId: operation.checkoutRequestId,
-        })
-      );
-    }
-
-    return invokePreparedCheckout(() =>
-      createCheckoutSession({
-        ...currentCommand,
-        checkoutAttemptId: attempt.checkoutAttemptId,
-        checkoutAttemptToken: attempt.checkoutAttemptToken,
-        checkoutRequestId: operation.checkoutRequestId,
-      })
-    );
+    return requestCurrentCheckoutOperation({
+      envelope: checkoutEnvelope,
+      currentCommand,
+      invokeWithRetry: invokePreparedCheckout,
+      createCheckoutSession,
+      resumeCheckoutSession,
+    });
   }
 
   async function prepareCheckout(methodName) {
@@ -534,6 +512,74 @@ export async function initCheckout() {
       error?.checkoutReplacementError === 'previous_checkout_usable' ||
       error?.orchestrationError === 'previous_checkout_usable'
     );
+  }
+
+  async function retryCurrentCheckoutOperation() {
+    await runCheckoutMutation(async () => {
+      const operation = checkoutEnvelope?.currentOperation;
+
+      if (!operation) {
+        throw new Error('Checkout retry state is unavailable.');
+      }
+
+      const methodName = getCheckoutOperationMethodName(checkoutEnvelope);
+
+      if (!methodName) {
+        throw new Error('Checkout retry is missing its selected shipping method.');
+      }
+
+      state.retryAvailable = false;
+      setCheckoutControlsBusy(true);
+      setPayButton('Retrying Payment...', true);
+
+      try {
+        await assertCurrentCart();
+        const result = await requestCurrentCheckoutOperation({
+          envelope: checkoutEnvelope,
+          currentCommand,
+          invokeWithRetry: invokePreparedCheckout,
+          createCheckoutSession,
+          resumeCheckoutSession,
+        });
+
+        if (['paid', 'payment_pending'].includes(result.checkout_state)) {
+          navigateToConfirmation(result.checkout_session_id);
+          return;
+        }
+
+        await installPreparedCheckout(result, methodName);
+        showError('');
+        setPayButton('Place Order', false);
+      } catch (error) {
+        if (error instanceof CheckoutCartChangedError || isSafelyResettableAttemptError(error)) {
+          await resetCheckoutForCurrentCart(
+            error instanceof CheckoutCartChangedError
+              ? 'Your basket changed. Checkout is being reset safely.'
+              : 'Checkout preparation expired and is being reset safely.'
+          );
+          return;
+        }
+
+        if (canRestorePreviousCheckout(error, false)) {
+          checkoutEnvelope = discardCheckoutOperation(checkoutEnvelope);
+          checkoutEnvelope = saveCheckoutAttempt(checkoutEnvelope);
+          currentCommand = null;
+          showError(error.message || 'The previous checkout remains available.');
+          setPayButton('Place Order', false);
+          return;
+        }
+
+        console.error('Checkout operation retry failed:', error);
+        showError(error.message || 'Payment recovery could not be completed.');
+        state.retryAvailable = Boolean(error?.retryable && checkoutEnvelope?.currentOperation);
+        setPayButton(
+          state.retryAvailable ? 'Retry Payment' : 'Payment Unavailable',
+          !state.retryAvailable
+        );
+      } finally {
+        setCheckoutControlsBusy(false);
+      }
+    });
   }
 
   function navigateToConfirmation(checkoutSessionId) {
@@ -690,9 +736,14 @@ export async function initCheckout() {
             checkoutEnvelope = saveCheckoutAttempt(checkoutEnvelope);
           }
           currentCommand = null;
+          state.retryAvailable = false;
           setPayButton('Place Order', false);
         } else {
-          setPayButton('Payment Unavailable', true);
+          state.retryAvailable = Boolean(error?.retryable && checkoutEnvelope?.currentOperation);
+          setPayButton(
+            state.retryAvailable ? 'Retry Payment' : 'Payment Unavailable',
+            !state.retryAvailable
+          );
         }
 
         throw error;
@@ -714,9 +765,7 @@ export async function initCheckout() {
     event.preventDefault();
 
     if (state.retryAvailable && !state.preparingPromise && !state.confirming) {
-      state.retryAvailable = false;
-      const methodName = checkoutEnvelope?.currentOperation?.selectedShippingMethodName || '';
-      await prepareCheckout(methodName);
+      await retryCurrentCheckoutOperation();
       return;
     }
 
@@ -844,14 +893,9 @@ export async function initCheckout() {
   }
 
   try {
-    await loadCurrentCartShippingOptions();
-
     if (checkoutEnvelope?.currentOperation) {
       const operation = checkoutEnvelope.currentOperation;
-      const methodName =
-        operation.selectedShippingMethodName ||
-        checkoutEnvelope.activeCheckout?.selectedShippingMethodName ||
-        '';
+      const methodName = getCheckoutOperationMethodName(checkoutEnvelope);
 
       if (!methodName) {
         throw new Error('Checkout recovery is missing its selected shipping method.');
@@ -860,44 +904,49 @@ export async function initCheckout() {
       setCheckoutControlsBusy(true);
       setPayButton('Recovering Checkout...', true);
 
-      try {
-        const result = await requestPreparedCheckout(
-          methodName,
-          '',
-          operation.kind === 'replacement'
-        );
-
-        if (['paid', 'payment_pending'].includes(result.checkout_state)) {
-          navigateToConfirmation(result.checkout_session_id);
-        } else {
+      await assertCurrentCart();
+      await recoverCheckoutOperationBeforeFreshState({
+        operation,
+        requestOperation: () =>
+          requestCurrentCheckoutOperation({
+            envelope: checkoutEnvelope,
+            currentCommand: null,
+            invokeWithRetry: invokePreparedCheckout,
+            createCheckoutSession,
+            resumeCheckoutSession,
+          }),
+        installPreparedCheckout: async (result) => {
           await installPreparedCheckout(result, methodName);
           setCheckoutControlsBusy(false);
           setPayButton('Place Order', false);
-        }
-      } catch (error) {
-        if (
-          error?.orchestrationError === 'checkout_request_not_found' &&
-          operation.phase === 'prepared-locally'
-        ) {
+        },
+        navigateToConfirmation,
+        discardLocalOperation: async () => {
           checkoutEnvelope = discardCheckoutOperation(checkoutEnvelope);
           checkoutEnvelope = saveCheckoutAttempt(checkoutEnvelope);
           state.protocolMode = 'negotiating';
           state.reservationCommitted = false;
+        },
+        resetTerminalOperation: async () => {
+          showError('Checkout recovery found no payable operation and is being reset safely.');
+
+          if (!(await resetChangedCartAttempt())) return false;
+
+          if (cart.length === 0) {
+            setPayButton('Basket Empty', true);
+            return false;
+          }
+
+          return true;
+        },
+        loadFreshShippingOptions: async () => {
+          await loadCurrentCartShippingOptions();
           setCheckoutControlsBusy(false);
           setPayButton('Select Shipping', true);
-        } else if (
-          isSafelyResettableAttemptError(error) ||
-          error?.orchestrationError === 'checkout_request_not_found'
-        ) {
-          await resetCheckoutForCurrentCart(
-            'Checkout recovery found no payable operation and is being reset safely.'
-          );
-          setCheckoutControlsBusy(false);
-        } else {
-          throw error;
-        }
-      }
+        },
+      });
     } else {
+      await loadCurrentCartShippingOptions();
       setPayButton('Select Shipping', true);
     }
   } catch (error) {

@@ -85,10 +85,10 @@ const supabase = createClient(
   { auth: { persistSession: false, autoRefreshToken: false } }
 );
 
-function jsonResponse(payload: unknown, status = 200) {
+function jsonResponse(payload: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(payload), {
     status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders, ...extraHeaders, 'Content-Type': 'application/json' },
   });
 }
 
@@ -1381,7 +1381,10 @@ async function handleReservationCheckout(request: Request, payload: Record<strin
             ? { retry_after_seconds: error.retryAfterSeconds }
             : {}),
         },
-        error.status
+        error.status,
+        error.status === 503 && error.retryAfterSeconds !== null
+          ? { 'Retry-After': String(error.retryAfterSeconds) }
+          : {}
       );
     }
 

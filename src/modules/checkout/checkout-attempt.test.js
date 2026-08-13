@@ -206,3 +206,26 @@ test('candidate promotion exposes one matching confirmation tuple and storage re
   clearCheckoutAttempt(storage);
   assert.equal(loadCheckoutAttempt(storage), null);
 });
+
+test('reconciliation retains replacement B while definitive predecessor usability permits C', async () => {
+  let envelope = beginCheckoutOperation(await createEnvelope(), 'initial');
+  const requestA = envelope.currentOperation.checkoutRequestId;
+  envelope = setCheckoutCandidate(envelope, capability({ checkoutRequestId: requestA }));
+  envelope = promoteCheckoutCandidate(envelope, 'Tracked');
+  envelope = beginCheckoutOperation(envelope, 'replacement', 'Tracked');
+  const requestB = envelope.currentOperation.checkoutRequestId;
+
+  envelope = setCheckoutOperationPhase(envelope, 'reconciliation-pending');
+  envelope = beginCheckoutOperation(envelope, 'replacement', 'Tracked');
+
+  assert.equal(envelope.currentOperation.checkoutRequestId, requestB);
+
+  envelope = discardCheckoutOperation(envelope);
+
+  assert.equal(envelope.activeCheckout.checkoutRequestId, requestA);
+
+  envelope = beginCheckoutOperation(envelope, 'replacement', 'Tracked');
+
+  assert.notEqual(envelope.currentOperation.checkoutRequestId, requestA);
+  assert.notEqual(envelope.currentOperation.checkoutRequestId, requestB);
+});

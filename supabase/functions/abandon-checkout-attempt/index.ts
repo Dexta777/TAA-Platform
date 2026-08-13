@@ -64,13 +64,17 @@ type AbandonmentContext = {
   reservation_status: string | null;
 };
 
-async function enqueueReconciliation(context: AbandonmentContext, checkoutAttemptId: string) {
+async function enqueueReconciliation(
+  context: AbandonmentContext,
+  checkoutAttemptId: string,
+  manualReview = false
+) {
   await callCheckoutRpc(supabase, 'enqueue_checkout_reconciliation', {
     p_checkout_attempt_id: checkoutAttemptId,
     p_checkout_intent_id: context.in_flight_checkout_intent_id || context.active_checkout_intent_id,
     p_lifecycle_incident_id: null,
     p_reason: 'browser_abandonment_requested',
-    p_manual_review: false,
+    p_manual_review: manualReview,
   });
 }
 
@@ -126,8 +130,12 @@ serve(async (request) => {
     }
 
     if (context.context_state !== 'active_session') {
-      if (context.active_checkout_intent_id || context.in_flight_checkout_intent_id) {
-        await enqueueReconciliation(context, checkoutAttemptId);
+      if (['reconciliation_pending', 'integrity_review'].includes(context.context_state)) {
+        await enqueueReconciliation(
+          context,
+          checkoutAttemptId,
+          context.context_state === 'integrity_review'
+        );
       }
 
       return jsonResponse({ result: 'reconciliation_pending' });
