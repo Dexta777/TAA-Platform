@@ -27,14 +27,13 @@ Before enabling it in production:
    staging before enabling the feature flag.
 8. Deploy the immutable Slice 5D frontend and verify reload recovery at every request/replacement
    stage before enabling new reservation attempts.
-9. Remove the deployed legacy Webflow order-confirmation caller, disable or undeploy
-   `get-order-confirmation`, and prove that an arbitrary PaymentIntent ID cannot return order PII.
+9. Keep the retired `get-order-confirmation` endpoint absent and verify that only the
+   capability-authorized replacement serves order confirmation PII.
 
-The repository retains `get-order-confirmation` temporarily because
-`legacy/webflow/order-confirmation.js` still references it. It is not an approved production path
-for reservation checkout and must never be reactivated as part of rollback. Only
+The historical `legacy/webflow/order-confirmation.js` reference is not a deployable function or an
+approved production path. `get-order-confirmation` must never be restored as part of rollback. Only
 `get-checkout-confirmation`, authorized by account ownership or a valid confirmation capability,
-may serve order confirmation PII after cutover.
+may serve order confirmation PII.
 
 An overdue local reservation is never released solely because its timestamp elapsed. Stripe must
 authoritatively prove that no payable path remains. Stripe unavailability therefore retains stock
@@ -99,17 +98,21 @@ Reconciler rotation uses `CHECKOUT_RECONCILIATION_SECRET` as current and optiona
 secret after all callers have switched. Successful authentication remains a prerequisite to any
 job claim. Phase 6A creates no reconciliation schedule.
 
-## Legacy endpoint retirement order
+## Legacy endpoint retirement
 
-Do not undeploy during Phase 6A. After Webflow and custom-code callers are proven absent, retire in
-this order:
+The following legacy Edge Functions have been retired remotely and removed from the deployable
+repository configuration:
 
-1. `delete-klaviyo-old-products`
-2. `get-order-confirmation` (never re-enable it during rollback)
-3. `create-payment-intent`
+- `delete-klaviyo-old-products` — retired; do not restore.
+- `get-order-confirmation` — retired; do not restore.
+- `create-payment-intent` — retired; do not restore, including during checkout rollback.
 
-When retiring `create-payment-intent`, preserve webhook support only for already-existing legacy
-PaymentIntents until reconciliation proves that compatibility path is no longer needed.
+Legacy PaymentIntent creation is closed. At retirement time, three historical PaymentIntent-only
+checkout rows remained pending. Their authoritative Stripe state requires later reconciliation, so
+the Stripe webhook's legacy `payment_intent.succeeded`, `payment_intent.payment_failed`, and
+`payment_intent.canceled` compatibility branches remain temporarily. Removing that compatibility
+is a separate later task after the outstanding rows are authoritatively reconciled and a sufficient
+observation window has elapsed.
 
 ## Discount entitlement concurrency
 

@@ -412,17 +412,6 @@ verify_jwt = false
 [functions.sync-klaviyo-catalog]
 verify_jwt = false
 
-# Legacy/admin endpoints are explicit pending retirement; this does not approve
-# continued production use. See docs/checkout-production-blockers.md.
-[functions.delete-klaviyo-old-products]
-verify_jwt = false
-
-[functions.get-order-confirmation]
-verify_jwt = false
-
-[functions.create-payment-intent]
-verify_jwt = false
-
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
