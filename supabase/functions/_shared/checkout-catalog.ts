@@ -1,4 +1,8 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.112.2';
+import {
+  CheckoutInventoryConflictError,
+  type CheckoutUnavailableItem,
+} from './checkout-inventory.ts';
 
 const MAX_CART_LINES = 100;
 const AMOUNT_PATTERN = /(\d+\s*(ml|l|g|kg))/i;
@@ -45,6 +49,7 @@ function aggregateCart(cart: unknown[]) {
 export async function resolveCanonicalCart(supabase: SupabaseClient, cart: unknown[]) {
   const aggregatedItems = aggregateCart(cart);
   const canonicalItems = [];
+  const unavailableItems: CheckoutUnavailableItem[] = [];
 
   for (const item of aggregatedItems) {
     const { data: product, error: productError } = await supabase
@@ -123,8 +128,12 @@ export async function resolveCanonicalCart(supabase: SupabaseClient, cart: unkno
       throw new Error('Product pricing is invalid.');
     }
 
-    if (!Number.isInteger(source.inventoryQuantity) || item.quantity > source.inventoryQuantity) {
-      throw new CheckoutInputError(`Insufficient stock for ${source.sku}.`);
+    if (!Number.isInteger(source.inventoryQuantity) || source.inventoryQuantity < 0) {
+      throw new Error('Product inventory is invalid.');
+    }
+
+    if (item.quantity > source.inventoryQuantity) {
+      unavailableItems.push({ sku: source.sku, reason: 'out_of_stock' });
     }
 
     if (!Number.isFinite(source.weightGrams) || source.weightGrams < 0) {
@@ -148,6 +157,10 @@ export async function resolveCanonicalCart(supabase: SupabaseClient, cart: unkno
       image_url: source.imageUrl,
       amount: source.amount,
     });
+  }
+
+  if (unavailableItems.length > 0) {
+    throw new CheckoutInventoryConflictError(unavailableItems);
   }
 
   return canonicalItems;

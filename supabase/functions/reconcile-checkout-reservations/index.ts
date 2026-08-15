@@ -607,6 +607,30 @@ serve(async (request) => {
   if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
   if (!authorized(request)) return new Response('Unauthorized', { status: 401 });
 
+  let expiredEmptyAttemptsTerminalized = 0;
+
+  try {
+    const terminalized = await callCheckoutRpc<number>(
+      supabase,
+      'terminalize_expired_empty_checkout_attempts_v1',
+      { p_batch_size: 25 }
+    );
+
+    if (
+      typeof terminalized === 'number' &&
+      Number.isSafeInteger(terminalized) &&
+      terminalized >= 0
+    ) {
+      expiredEmptyAttemptsTerminalized = terminalized;
+    } else {
+      throw new Error('Expired empty attempt cleanup returned an invalid count.');
+    }
+  } catch (error) {
+    console.warn('EXPIRED EMPTY CHECKOUT ATTEMPT CLEANUP FAILED:', {
+      error_name: error instanceof Error ? error.name : 'unknown',
+    });
+  }
+
   const queueWorkerLeaseId = crypto.randomUUID();
   const { data, error } = await supabase.rpc('claim_checkout_reconciliation_jobs', {
     p_worker_lease_id: queueWorkerLeaseId,
@@ -626,5 +650,8 @@ serve(async (request) => {
     );
   }
 
-  return Response.json({ claimed: jobs.length });
+  return Response.json({
+    claimed: jobs.length,
+    expired_empty_attempts_terminalized: expiredEmptyAttemptsTerminalized,
+  });
 });

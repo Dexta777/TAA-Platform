@@ -7,6 +7,18 @@ export function getRpcResultRow<T>(data: T | T[] | null): T | null {
   return data;
 }
 
+export class CheckoutDatabaseError extends Error {
+  code: string | null;
+  details: string | null;
+
+  constructor(message: string, code: unknown, details: unknown) {
+    super(message);
+    this.name = 'CheckoutDatabaseError';
+    this.code = typeof code === 'string' ? code : null;
+    this.details = typeof details === 'string' ? details : null;
+  }
+}
+
 export async function callCheckoutRpc<T>(
   supabase: SupabaseClient,
   functionName: string,
@@ -15,9 +27,11 @@ export async function callCheckoutRpc<T>(
   const { data, error } = await supabase.rpc(functionName, parameters);
 
   if (error) {
-    const safeError = new Error(error.message || `Checkout RPC ${functionName} failed.`);
-    safeError.name = 'CheckoutDatabaseError';
-    throw safeError;
+    throw new CheckoutDatabaseError(
+      error.message || `Checkout RPC ${functionName} failed.`,
+      error.code,
+      error.details
+    );
   }
 
   return getRpcResultRow(data as T | T[] | null);

@@ -6,6 +6,10 @@ import {
   resolveCanonicalCart,
 } from '../_shared/checkout-catalog.ts';
 import {
+  CheckoutInventoryConflictError,
+  getCheckoutInventoryConflictPayload,
+} from '../_shared/checkout-inventory.ts';
+import {
   browserErrorResponse,
   type BrowserSecurityContext,
   HttpSecurityError,
@@ -97,6 +101,12 @@ serve(async (request) => {
     console.error('GET SHIPPING OPTIONS ERROR:', {
       error_name: error instanceof Error ? error.name : 'unknown',
     });
+
+    if (error instanceof CheckoutInventoryConflictError) {
+      return context
+        ? jsonResponse(context, getCheckoutInventoryConflictPayload(error), 409)
+        : browserErrorResponse(error);
+    }
 
     if (error instanceof CheckoutInputError) {
       return context

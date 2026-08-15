@@ -72,6 +72,42 @@ An overdue local reservation is never released solely because its timestamp elap
 authoritatively prove that no payable path remains. Stripe unavailability therefore retains stock
 and retries later.
 
+### Slice 7C1 inventory-conflict Webflow contract
+
+The deliberate checkout inventory-conflict panel requires these elements inside
+`[data-checkout-root="true"]`:
+
+- `[data-checkout-inventory-conflict]` — focusable live region and panel wrapper.
+- `[data-checkout-inventory-title]` — conflict heading.
+- `[data-checkout-inventory-message]` — safe summary text.
+- `[data-checkout-inventory-items]` — generated item container.
+- `[data-checkout-inventory-retry]` — semantic button for one manual availability recheck.
+- `[data-checkout-inventory-continue]` — semantic button that removes every unavailable line.
+
+JavaScript generates each item with `[data-checkout-inventory-item]`,
+`[data-checkout-inventory-item-title]`, `[data-checkout-inventory-item-reason]`, and, when the
+current cart has an image, `[data-checkout-inventory-item-image]`. Webflow owns visible layout and
+styling. The panel and conditional Try Again action use the established `data-ui-hidden` attribute
+for hidden state; the published site must keep its existing rule that hides that attribute.
+
+The backend returns canonical SKUs and reasons only. Titles and images are mapped from the current
+local basket, and both actions are fenced by the cart fingerprint and checkout request identity.
+The typed `TAI01` database detail is emitted only when every canonical SKU is non-empty and at most
+200 characters, and its serialized JSON is capped at 32,768 bytes; violations fail as generic
+internal checkout errors rather than exposing a truncated or oversized typed payload.
+Try Again is present only when every conflict is temporary, performs one customer-initiated check,
+and creates no automatic retry loop. Continue Without explicitly updates `taa_cart`, safely
+terminalizes/resets the failed empty attempt, and re-runs catalogue, shipping, discount, inventory,
+and Session preparation for the reduced basket.
+
+Slice 7C2 may attach availability-subscription UI to the generated item or panel selectors above.
+Slice 7C1 exposes no Notify action and makes no notification or delivery promise.
+
+The reconciler now invokes bounded service-only cleanup for expired active reservation-v1 attempts
+that provably have no intent, reservation, live pointer, or active admission. It retains those rows
+as `expired` audit history. The reconciler remains unscheduled until the existing production
+activation runbook is completed.
+
 ## Klaviyo delivery after webhook replay
 
 Klaviyo delivery is intentionally best effort and happens only after a newly finalized order. If

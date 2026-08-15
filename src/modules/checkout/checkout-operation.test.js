@@ -1,10 +1,76 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  invokeCheckoutOperationOnce,
   invokeCheckoutOperationWithRetry,
   recoverCheckoutOperationBeforeFreshState,
   requestCurrentCheckoutOperation,
 } from './checkout-operation.js';
+
+test('manual inventory retry submits exactly once without an automatic retry loop', async () => {
+  const phases = [];
+  let calls = 0;
+  const conflict = Object.assign(new Error('still temporarily reserved'), {
+    checkoutInventoryError: 'inventory_conflict',
+  });
+
+  await assert.rejects(
+    () =>
+      invokeCheckoutOperationOnce(
+        async () => {
+          calls += 1;
+          throw conflict;
+        },
+        { persistPhase: (phase) => phases.push(phase) }
+      ),
+    conflict
+  );
+
+  assert.equal(calls, 1);
+  assert.deepEqual(phases, ['submitted']);
+});
+
+test('manual inventory Try Again re-admits the same request and never creates request C', async () => {
+  const envelope = operationFixture('initial');
+  const requestIds = [];
+  let inventoryHeld = true;
+  const dependencies = {
+    createCheckoutSession: async (payload) => {
+      requestIds.push(payload.checkoutRequestId);
+
+      if (inventoryHeld) {
+        throw Object.assign(new Error('temporarily reserved'), {
+          checkoutInventoryError: 'inventory_conflict',
+          unavailableItems: [{ sku: 'SKU', reason: 'temporarily_reserved' }],
+        });
+      }
+
+      return { checkout_protocol_version: 'reservation_v1' };
+    },
+    resumeCheckoutSession: async () => assert.fail('same-page Try Again retains its command'),
+    invokeWithRetry: (request) => invokeCheckoutOperationOnce(request, { persistPhase: () => {} }),
+  };
+
+  await assert.rejects(() =>
+    requestCurrentCheckoutOperation({
+      envelope,
+      currentCommand: { cart: [{ sku: 'SKU', quantity: 1 }] },
+      ...dependencies,
+    })
+  );
+
+  inventoryHeld = false;
+  await requestCurrentCheckoutOperation({
+    envelope,
+    currentCommand: { cart: [{ sku: 'SKU', quantity: 1 }] },
+    ...dependencies,
+  });
+
+  assert.deepEqual(requestIds, [
+    envelope.currentOperation.checkoutRequestId,
+    envelope.currentOperation.checkoutRequestId,
+  ]);
+});
 
 function operationFixture(kind = 'initial') {
   return {

@@ -41,6 +41,11 @@ export async function invokeCheckoutOperationWithRetry(
   throw new Error('Payment preparation could not be completed.');
 }
 
+export async function invokeCheckoutOperationOnce(request, { persistPhase }) {
+  persistPhase('submitted');
+  return request();
+}
+
 export async function requestCurrentCheckoutOperation({
   envelope,
   currentCommand,

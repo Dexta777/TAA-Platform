@@ -1,4 +1,4 @@
-import { getCart } from '../cart/cart.js';
+import { getCart, removeCartItems } from '../cart/cart.js';
 import { createCheckoutElementsSdk } from '../../services/stripe/checkout.js';
 import {
   abandonCheckoutAttempt,
@@ -30,7 +30,13 @@ import {
 } from './checkout-attempt.js';
 import { createCheckoutDiscount } from './checkout-discount.js';
 import {
+  continueWithoutUnavailableItems,
+  createCheckoutInventoryConflict,
+  mapCheckoutInventoryConflict,
+} from './checkout-inventory-conflict.js';
+import {
   getCheckoutOperationMethodName,
+  invokeCheckoutOperationOnce,
   invokeCheckoutOperationWithRetry,
   recoverCheckoutOperationBeforeFreshState,
   requestCurrentCheckoutOperation,
@@ -115,8 +121,20 @@ class CheckoutCartChangedError extends Error {
   }
 }
 
-export async function initCheckout() {
-  const root = document.querySelector('[data-checkout-root="true"]');
+export async function initCheckout({
+  root = document.querySelector('[data-checkout-root="true"]'),
+  dependencies = {},
+} = {}) {
+  const {
+    abandonCheckoutAttempt: abandonCheckoutAttemptDependency = abandonCheckoutAttempt,
+    createCheckoutElementsSdk: createCheckoutElementsSdkDependency = createCheckoutElementsSdk,
+    createCheckoutSession: createCheckoutSessionDependency = createCheckoutSession,
+    getCart: getCartDependency = getCart,
+    getShippingOptions: getShippingOptionsDependency = getShippingOptions,
+    removeCartItems: removeCartItemsDependency = removeCartItems,
+    resumeCheckoutSession: resumeCheckoutSessionDependency = resumeCheckoutSession,
+    updateCheckoutDetails: updateCheckoutDetailsDependency = updateCheckoutDetails,
+  } = dependencies;
 
   if (!root) return null;
 
@@ -131,7 +149,7 @@ export async function initCheckout() {
     return null;
   }
 
-  let cart = getCart();
+  let cart = getCartDependency();
   const summary = createCheckoutSummary(root);
   const state = {
     actions: null,
@@ -150,6 +168,7 @@ export async function initCheckout() {
     shippingOptions: [],
   };
   let discountController;
+  let inventoryConflictController;
   let shipping;
   let checkoutEnvelope = null;
   let currentCommand = null;
@@ -171,7 +190,59 @@ export async function initCheckout() {
 
   function setCheckoutControlsBusy(busy) {
     discountController?.setBusy(busy);
+    inventoryConflictController?.setBusy(busy);
     shipping?.setBusy(busy);
+  }
+
+  function annotateInventoryConflict(error, expectedCartFingerprint, expectedCheckoutRequestId) {
+    if (error?.checkoutInventoryError !== 'inventory_conflict') return;
+
+    error.inventoryCartFingerprint = expectedCartFingerprint;
+    error.inventoryCheckoutRequestId = expectedCheckoutRequestId;
+  }
+
+  async function isInventoryConflictCurrent(conflict) {
+    if (
+      conflict.cartFingerprint !== cartFingerprint ||
+      conflict.checkoutRequestId !== (checkoutEnvelope?.currentOperation?.checkoutRequestId || null)
+    ) {
+      return false;
+    }
+
+    const currentCart = getCartDependency();
+    const currentFingerprint = await fingerprintCart(currentCart);
+    const currentSkus = new Set(currentCart.map((item) => item?.sku));
+
+    return (
+      currentFingerprint === conflict.cartFingerprint &&
+      conflict.unavailableItems.every((item) => currentSkus.has(item.sku))
+    );
+  }
+
+  async function presentInventoryConflict(error) {
+    if (state.actions || state.paymentElement) return false;
+
+    const mappedConflict = mapCheckoutInventoryConflict(error, getCartDependency());
+
+    if (!mappedConflict) return false;
+
+    const conflict = {
+      ...mappedConflict,
+      cartFingerprint: error.inventoryCartFingerprint,
+      checkoutRequestId: error.inventoryCheckoutRequestId,
+    };
+
+    if (!(await isInventoryConflictCurrent(conflict))) return false;
+
+    if (!inventoryConflictController?.show(conflict)) {
+      console.error('Checkout inventory conflict UI is unavailable.');
+      return false;
+    }
+
+    showError('');
+    state.retryAvailable = false;
+    setPayButton('Payment Unavailable', true);
+    return true;
   }
 
   async function runCheckoutMutation(callback) {
@@ -262,7 +333,7 @@ export async function initCheckout() {
     const previousCheckoutSessionId = state.checkoutSessionId;
     const nextGeneration = state.elementsGeneration + 1;
     const addressData = getCheckoutAddressData(root);
-    const checkout = await createCheckoutElementsSdk(
+    const checkout = await createCheckoutElementsSdkDependency(
       result.client_secret,
       getStripeDefaultValues(addressData)
     );
@@ -347,11 +418,12 @@ export async function initCheckout() {
 
     currentCommand = null;
     state.retryAvailable = false;
+    inventoryConflictController?.hide();
   }
 
   async function currentCartMatchesAttempt() {
     try {
-      return (await fingerprintCart(getCart())) === cartFingerprint;
+      return (await fingerprintCart(getCartDependency())) === cartFingerprint;
     } catch {
       return false;
     }
@@ -362,7 +434,15 @@ export async function initCheckout() {
   }
 
   async function loadCurrentCartShippingOptions() {
-    const shippingResult = await getShippingOptions(cart);
+    const expectedCartFingerprint = cartFingerprint;
+    let shippingResult;
+
+    try {
+      shippingResult = await getShippingOptionsDependency(cart);
+    } catch (error) {
+      annotateInventoryConflict(error, expectedCartFingerprint, null);
+      throw error;
+    }
 
     if (!Array.isArray(shippingResult.options) || shippingResult.options.length === 0) {
       throw new Error('No shipping methods are available for this basket.');
@@ -393,18 +473,23 @@ export async function initCheckout() {
     if (state.protocolMode === 'legacy') {
       const addressData = getCheckoutAddressData(root);
 
-      return createCheckoutSession({
-        cart,
-        shippingMethodName: methodName,
-        addressData,
-        discountCode,
-        ...(replaceCurrentCheckout && state.checkoutSessionId
-          ? {
-              replaceCheckoutSessionId: state.checkoutSessionId,
-              replaceConfirmationToken: state.confirmationToken,
-            }
-          : {}),
-      });
+      try {
+        return await createCheckoutSessionDependency({
+          cart,
+          shippingMethodName: methodName,
+          addressData,
+          discountCode,
+          ...(replaceCurrentCheckout && state.checkoutSessionId
+            ? {
+                replaceCheckoutSessionId: state.checkoutSessionId,
+                replaceConfirmationToken: state.confirmationToken,
+              }
+            : {}),
+        });
+      } catch (error) {
+        annotateInventoryConflict(error, cartFingerprint, null);
+        throw error;
+      }
     }
 
     if (!checkoutEnvelope) {
@@ -434,13 +519,21 @@ export async function initCheckout() {
       };
     }
 
-    return requestCurrentCheckoutOperation({
-      envelope: checkoutEnvelope,
-      currentCommand,
-      invokeWithRetry: invokePreparedCheckout,
-      createCheckoutSession,
-      resumeCheckoutSession,
-    });
+    const expectedCartFingerprint = cartFingerprint;
+    const expectedCheckoutRequestId = checkoutEnvelope.currentOperation.checkoutRequestId;
+
+    try {
+      return await requestCurrentCheckoutOperation({
+        envelope: checkoutEnvelope,
+        currentCommand,
+        invokeWithRetry: invokePreparedCheckout,
+        createCheckoutSession: createCheckoutSessionDependency,
+        resumeCheckoutSession: resumeCheckoutSessionDependency,
+      });
+    } catch (error) {
+      annotateInventoryConflict(error, expectedCartFingerprint, expectedCheckoutRequestId);
+      throw error;
+    }
   }
 
   async function prepareCheckout(methodName) {
@@ -465,6 +558,12 @@ export async function initCheckout() {
         showError('');
         succeeded = true;
       } catch (error) {
+        if (error?.checkoutInventoryError === 'inventory_conflict') {
+          if (await presentInventoryConflict(error)) return;
+
+          console.error('Checkout inventory conflict response was stale or could not be rendered.');
+        }
+
         if (error instanceof CheckoutCartChangedError || isSafelyResettableAttemptError(error)) {
           try {
             await resetCheckoutForCurrentCart(
@@ -531,6 +630,8 @@ export async function initCheckout() {
       state.retryAvailable = false;
       setCheckoutControlsBusy(true);
       setPayButton('Retrying Payment...', true);
+      const expectedCartFingerprint = cartFingerprint;
+      const expectedCheckoutRequestId = operation.checkoutRequestId;
 
       try {
         await assertCurrentCart();
@@ -538,8 +639,8 @@ export async function initCheckout() {
           envelope: checkoutEnvelope,
           currentCommand,
           invokeWithRetry: invokePreparedCheckout,
-          createCheckoutSession,
-          resumeCheckoutSession,
+          createCheckoutSession: createCheckoutSessionDependency,
+          resumeCheckoutSession: resumeCheckoutSessionDependency,
         });
 
         if (['paid', 'payment_pending'].includes(result.checkout_state)) {
@@ -551,6 +652,14 @@ export async function initCheckout() {
         showError('');
         setPayButton('Place Order', false);
       } catch (error) {
+        annotateInventoryConflict(error, expectedCartFingerprint, expectedCheckoutRequestId);
+
+        if (error?.checkoutInventoryError === 'inventory_conflict') {
+          if (await presentInventoryConflict(error)) return;
+
+          console.error('Checkout inventory conflict response was stale or could not be rendered.');
+        }
+
         if (error instanceof CheckoutCartChangedError || isSafelyResettableAttemptError(error)) {
           await resetCheckoutForCurrentCart(
             error instanceof CheckoutCartChangedError
@@ -601,7 +710,7 @@ export async function initCheckout() {
     setCheckoutControlsBusy(true);
     setPayButton('Resetting Checkout...', true);
 
-    const result = await abandonCheckoutAttempt({
+    const result = await abandonCheckoutAttemptDependency({
       checkoutAttemptId: checkoutEnvelope.attempt.checkoutAttemptId,
       checkoutAttemptToken: checkoutEnvelope.attempt.checkoutAttemptToken,
     });
@@ -616,7 +725,7 @@ export async function initCheckout() {
     }
 
     clearCheckoutAttempt();
-    cart = getCart();
+    cart = getCartDependency();
     state.paymentElement?.destroy();
     paymentElementWrapper.replaceChildren();
     state.actions = null;
@@ -631,6 +740,7 @@ export async function initCheckout() {
     summary.renderItems(cart);
     summary.renderDiscount(null);
     discountController.clearDiscount();
+    inventoryConflictController.hide();
 
     if (cart.length === 0) {
       cartFingerprint = '';
@@ -663,6 +773,113 @@ export async function initCheckout() {
 
     await loadCurrentCartShippingOptions();
     setPayButton('Select Shipping', true);
+  }
+
+  async function handleContinueWithoutUnavailableItems(conflict) {
+    await runCheckoutMutation(async () => {
+      setCheckoutControlsBusy(true);
+      setPayButton('Updating Basket...', true);
+
+      try {
+        const outcome = await continueWithoutUnavailableItems({
+          conflict,
+          isCurrent: isInventoryConflictCurrent,
+          removeItems: removeCartItemsDependency,
+          resetCheckout: async () => {
+            inventoryConflictController.hide();
+            await resetCheckoutForCurrentCart('');
+          },
+        });
+
+        if (outcome.status === 'stale') {
+          inventoryConflictController.hide();
+          showError('Your basket changed. Please review it before continuing.');
+          setPayButton('Payment Unavailable', true);
+        }
+      } catch (error) {
+        console.error('Checkout inventory conflict removal failed:', error);
+        showError(error.message || 'Your basket could not be updated safely.');
+        setPayButton('Payment Unavailable', true);
+      } finally {
+        setCheckoutControlsBusy(false);
+      }
+    });
+  }
+
+  async function handleInventoryTryAgain(conflict) {
+    await runCheckoutMutation(async () => {
+      if (!conflict.canRetry) return;
+
+      if (!(await isInventoryConflictCurrent(conflict))) {
+        inventoryConflictController.hide();
+        showError('Your basket changed. Please review it before continuing.');
+        setPayButton('Payment Unavailable', true);
+        return;
+      }
+
+      setCheckoutControlsBusy(true);
+      setPayButton('Checking Availability...', true);
+
+      try {
+        const operation = checkoutEnvelope?.currentOperation;
+
+        if (!operation) {
+          await loadCurrentCartShippingOptions();
+          inventoryConflictController.hide();
+          showError('');
+          setPayButton('Select Shipping', true);
+          return;
+        }
+
+        const methodName = getCheckoutOperationMethodName(checkoutEnvelope);
+
+        if (!methodName) throw new Error('Checkout retry is missing its selected shipping method.');
+
+        let result;
+
+        try {
+          result = await requestCurrentCheckoutOperation({
+            envelope: checkoutEnvelope,
+            currentCommand,
+            invokeWithRetry: (request) =>
+              invokeCheckoutOperationOnce(request, { persistPhase: persistOperationPhase }),
+            createCheckoutSession: createCheckoutSessionDependency,
+            resumeCheckoutSession: resumeCheckoutSessionDependency,
+          });
+        } catch (error) {
+          annotateInventoryConflict(error, conflict.cartFingerprint, conflict.checkoutRequestId);
+          throw error;
+        }
+
+        if (!(await isInventoryConflictCurrent(conflict))) return;
+
+        if (['paid', 'payment_pending'].includes(result.checkout_state)) {
+          navigateToConfirmation(result.checkout_session_id);
+          return;
+        }
+
+        await installPreparedCheckout(result, methodName);
+        inventoryConflictController.hide();
+        showError('');
+        setPayButton('Place Order', false);
+      } catch (error) {
+        if (!(await isInventoryConflictCurrent(conflict))) return;
+
+        if (
+          error?.checkoutInventoryError === 'inventory_conflict' &&
+          (await presentInventoryConflict(error))
+        ) {
+          return;
+        }
+
+        console.error('Checkout inventory retry failed:', error);
+        inventoryConflictController.hide();
+        showError(error.message || 'Availability could not be checked.');
+        setPayButton('Payment Unavailable', true);
+      } finally {
+        setCheckoutControlsBusy(false);
+      }
+    });
   }
 
   function isSafelyResettableAttemptError(error) {
@@ -760,6 +977,10 @@ export async function initCheckout() {
     onApply: (code) => replaceDiscount(code),
     onRemove: () => replaceDiscount(''),
   });
+  inventoryConflictController = createCheckoutInventoryConflict(root, {
+    onContinue: handleContinueWithoutUnavailableItems,
+    onRetry: handleInventoryTryAgain,
+  });
 
   payButton.addEventListener('click', async (event) => {
     event.preventDefault();
@@ -806,7 +1027,7 @@ export async function initCheckout() {
         }
       }
 
-      await updateCheckoutDetails({
+      await updateCheckoutDetailsDependency({
         checkoutSessionId: state.checkoutSessionId,
         confirmationToken: state.confirmationToken,
         addressData,
@@ -912,8 +1133,8 @@ export async function initCheckout() {
             envelope: checkoutEnvelope,
             currentCommand: null,
             invokeWithRetry: invokePreparedCheckout,
-            createCheckoutSession,
-            resumeCheckoutSession,
+            createCheckoutSession: createCheckoutSessionDependency,
+            resumeCheckoutSession: resumeCheckoutSessionDependency,
           }),
         installPreparedCheckout: async (result) => {
           await installPreparedCheckout(result, methodName);
@@ -957,10 +1178,17 @@ export async function initCheckout() {
       setPayButton('Select Shipping', true);
     }
   } catch (error) {
-    console.error('Checkout initialization failed:', error);
-    showError(error.message || 'Checkout could not be loaded.');
-    setPayButton('Payment Unavailable', true);
-    return null;
+    if (
+      error?.checkoutInventoryError === 'inventory_conflict' &&
+      (await presentInventoryConflict(error))
+    ) {
+      setCheckoutControlsBusy(false);
+    } else {
+      console.error('Checkout initialization failed:', error);
+      showError(error.message || 'Checkout could not be loaded.');
+      setPayButton('Payment Unavailable', true);
+      return null;
+    }
   }
 
   window.addEventListener('storage', (event) => {

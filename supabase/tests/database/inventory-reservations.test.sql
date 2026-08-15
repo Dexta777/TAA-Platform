@@ -400,9 +400,9 @@ SELECT throws_ok(
       clock_timestamp() + interval '29 minutes'
     )
   $$,
-  'P0001',
-  'Insufficient available inventory for SKU RESERVATION-PRODUCT.',
-  'a reservation exceeding available-to-sell is rejected'
+  'TAI01',
+  'Checkout inventory conflict.',
+  'a reservation exceeding available-to-sell uses the typed inventory conflict'
 );
 
 SELECT is(

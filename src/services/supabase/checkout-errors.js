@@ -37,6 +37,10 @@ const SAFE_RATE_LIMIT_SCOPES = new Set([
   'confirmation_network',
   'confirmation_authorized_checkout',
 ]);
+const CHECKOUT_INVENTORY_ERROR = 'inventory_conflict';
+const MAXIMUM_UNAVAILABLE_ITEMS = 100;
+const SAFE_INVENTORY_REASONS = new Set(['temporarily_reserved', 'out_of_stock']);
+const INVENTORY_CONFLICT_MESSAGE = 'One or more items in your basket are currently unavailable.';
 
 export class CheckoutRequestError extends Error {
   constructor(
@@ -52,6 +56,8 @@ export class CheckoutRequestError extends Error {
       retryable = false,
       rateLimitScope = null,
       checkoutRequestAdmitted = null,
+      checkoutInventoryError = null,
+      unavailableItems = [],
     } = {}
   ) {
     super(message, { cause });
@@ -65,7 +71,45 @@ export class CheckoutRequestError extends Error {
     this.retryable = retryable;
     this.rateLimitScope = rateLimitScope;
     this.checkoutRequestAdmitted = checkoutRequestAdmitted;
+    this.checkoutInventoryError = checkoutInventoryError;
+    this.unavailableItems = Object.freeze(
+      unavailableItems.map((item) => Object.freeze({ ...item }))
+    );
   }
+}
+
+function getUnavailableItems(payload, status) {
+  if (
+    status !== 409 ||
+    payload?.checkout_inventory_error !== CHECKOUT_INVENTORY_ERROR ||
+    payload?.checkout_request_admitted !== false ||
+    payload?.retryable !== false ||
+    !Array.isArray(payload?.unavailable_items) ||
+    payload.unavailable_items.length === 0 ||
+    payload.unavailable_items.length > MAXIMUM_UNAVAILABLE_ITEMS
+  ) {
+    return null;
+  }
+
+  const seenSkus = new Set();
+  const unavailableItems = [];
+
+  for (const value of payload.unavailable_items) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+    const keys = Object.keys(value).sort();
+    const sku = value.sku;
+    const reason = value.reason;
+
+    if (keys.length !== 2 || keys[0] !== 'reason' || keys[1] !== 'sku') return null;
+    if (typeof sku !== 'string' || sku !== sku.trim() || !sku || sku.length > 200) return null;
+    if (seenSkus.has(sku) || !SAFE_INVENTORY_REASONS.has(reason)) return null;
+
+    seenSkus.add(sku);
+    unavailableItems.push({ sku, reason });
+  }
+
+  return unavailableItems;
 }
 
 function getRetryAfterMs(payload, response) {
@@ -81,10 +125,15 @@ export function createCheckoutInvocationError(
   fallbackMessage,
   { cause, status = null, response = null } = {}
 ) {
-  const message =
-    typeof payload?.error === 'string' && payload.error.trim()
-      ? payload.error.trim()
-      : fallbackMessage;
+  const unavailableItems = getUnavailableItems(payload, status);
+  const hasInventoryMarker = payload?.checkout_inventory_error !== undefined;
+  const message = unavailableItems
+    ? INVENTORY_CONFLICT_MESSAGE
+    : hasInventoryMarker
+      ? fallbackMessage
+      : typeof payload?.error === 'string' && payload.error.trim()
+        ? payload.error.trim()
+        : fallbackMessage;
   const discountError = SAFE_DISCOUNT_ERRORS.has(payload?.discount_error)
     ? payload.discount_error
     : null;
@@ -117,6 +166,8 @@ export function createCheckoutInvocationError(
     retryAfterMs,
     rateLimitScope,
     checkoutRequestAdmitted,
+    checkoutInventoryError: unavailableItems ? CHECKOUT_INVENTORY_ERROR : null,
+    unavailableItems: unavailableItems || [],
     retryable:
       (status === 429 && orchestrationError === 'rate_limited') ||
       orchestrationError === 'operation_in_progress' ||

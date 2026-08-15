@@ -39,3 +39,69 @@ test('application rate limiting remains distinct from Stripe rate limiting', () 
   assert.equal(stripeError.orchestrationError, 'stripe_rate_limited');
   assert.equal(stripeError.checkoutRequestAdmitted, null);
 });
+
+test('valid item-aware inventory conflict is defensively mapped and immutable', () => {
+  const error = createCheckoutInvocationError(
+    {
+      error: '<strong>untrusted server title</strong>',
+      checkout_inventory_error: 'inventory_conflict',
+      checkout_request_admitted: false,
+      retryable: false,
+      unavailable_items: [
+        { sku: 'CANONICAL-A', reason: 'temporarily_reserved' },
+        { sku: 'CANONICAL-B', reason: 'out_of_stock' },
+      ],
+    },
+    'Payment could not be prepared.',
+    { status: 409 }
+  );
+
+  assert.equal(error.message, 'One or more items in your basket are currently unavailable.');
+  assert.equal(error.checkoutInventoryError, 'inventory_conflict');
+  assert.equal(error.checkoutRequestAdmitted, false);
+  assert.equal(error.retryable, false);
+  assert.deepEqual(error.unavailableItems, [
+    { sku: 'CANONICAL-A', reason: 'temporarily_reserved' },
+    { sku: 'CANONICAL-B', reason: 'out_of_stock' },
+  ]);
+  assert.equal(Object.isFrozen(error.unavailableItems), true);
+  assert.equal(Object.isFrozen(error.unavailableItems[0]), true);
+});
+
+test('malformed inventory payload remains a generic checkout failure', () => {
+  const malformedPayloads = [
+    {
+      checkout_inventory_error: 'inventory_conflict',
+      checkout_request_admitted: true,
+      retryable: false,
+      unavailable_items: [{ sku: 'A', reason: 'out_of_stock' }],
+    },
+    {
+      checkout_inventory_error: 'inventory_conflict',
+      checkout_request_admitted: false,
+      retryable: false,
+      unavailable_items: [{ sku: 'A', reason: 'unknown' }],
+    },
+    {
+      checkout_inventory_error: 'inventory_conflict',
+      checkout_request_admitted: false,
+      retryable: false,
+      unavailable_items: [
+        { sku: 'A', reason: 'out_of_stock' },
+        { sku: 'A', reason: 'out_of_stock' },
+      ],
+    },
+  ];
+
+  malformedPayloads.forEach((payload) => {
+    const error = createCheckoutInvocationError(
+      { error: '<script>unsafe</script>', ...payload },
+      'Payment could not be prepared.',
+      { status: 409 }
+    );
+
+    assert.equal(error.message, 'Payment could not be prepared.');
+    assert.equal(error.checkoutInventoryError, null);
+    assert.deepEqual(error.unavailableItems, []);
+  });
+});

@@ -282,6 +282,19 @@ export function removeCartItem(sku) {
   return copyCart(updatedCart);
 }
 
+export function removeCartItems(skus) {
+  if (!Array.isArray(skus) || skus.length === 0) {
+    throwCartError(CART_ERROR_CODES.INVALID_SELECTION, 'Cart item SKUs are required.');
+  }
+
+  const skuSet = new Set(skus.map((sku) => normalizeSku(sku)));
+  const cart = loadCart();
+  const updatedCart = cart.filter((item) => !skuSet.has(item?.sku));
+
+  saveCart(updatedCart);
+  return copyCart(updatedCart);
+}
+
 export function getCart() {
   return copyCart(loadCart());
 }

@@ -59,6 +59,11 @@ import {
   loadPersistedCheckoutSnapshot,
 } from '../_shared/checkout-orchestration.ts';
 import {
+  CheckoutInventoryConflictError,
+  confirmCheckoutInventoryConflict,
+  getCheckoutInventoryConflictPayload,
+} from '../_shared/checkout-inventory.ts';
+import {
   browserErrorResponse,
   type BrowserSecurityContext,
   HttpSecurityError,
@@ -501,6 +506,37 @@ async function cancelAdmissionBestEffort(
       checkout_request_id: checkoutRequestId,
       error_name: error instanceof Error ? error.name : 'unknown',
     });
+  }
+}
+
+async function cancelAdmissionStrictly(
+  checkoutAttemptId: string | null,
+  checkoutRequestId: string | null,
+  currentUserId: string | null,
+  capabilityHash: string | null
+) {
+  if (!checkoutAttemptId || !checkoutRequestId || !capabilityHash) return false;
+
+  try {
+    const cancelled = await callCheckoutRpc<boolean>(
+      supabase,
+      'cancel_checkout_request_admission_v1',
+      {
+        p_checkout_attempt_id: checkoutAttemptId,
+        p_checkout_request_id: checkoutRequestId,
+        p_current_user_id: currentUserId,
+        p_capability_hash: capabilityHash,
+      }
+    );
+
+    return cancelled === true;
+  } catch (error) {
+    console.error('CHECKOUT INVENTORY CONFLICT ADMISSION CANCELLATION FAILED:', {
+      checkout_attempt_id: checkoutAttemptId,
+      checkout_request_id: checkoutRequestId,
+      error_name: error instanceof Error ? error.name : 'unknown',
+    });
+    return false;
   }
 }
 
@@ -1386,6 +1422,28 @@ async function handleReservationCheckout(
       generation: Number(confirmationGeneration),
     });
   } catch (error) {
+    const inventoryConflict = await confirmCheckoutInventoryConflict({
+      error,
+      cancellationRequired: true,
+      cancelAdmission: () =>
+        cancellableAdmission
+          ? cancelAdmissionStrictly(
+              admittedAttemptId,
+              admittedRequestId,
+              admittedUserId,
+              admittedCapabilityHash
+            )
+          : Promise.resolve(false),
+    });
+
+    if (inventoryConflict) {
+      return jsonResponse(
+        securityContext,
+        getCheckoutInventoryConflictPayload(inventoryConflict),
+        409
+      );
+    }
+
     if (error instanceof CheckoutInputError) {
       if (cancellableAdmission) {
         await cancelAdmissionBestEffort(
@@ -2003,6 +2061,12 @@ serve(async (request) => {
     if (error instanceof HttpSecurityError) return browserErrorResponse(error, securityContext);
     if (error instanceof RateLimitServiceError && securityContext) {
       return jsonResponse(securityContext, { error: error.message }, 503);
+    }
+
+    if (error instanceof CheckoutInventoryConflictError) {
+      return securityContext
+        ? jsonResponse(securityContext, getCheckoutInventoryConflictPayload(error), 409)
+        : browserErrorResponse(error);
     }
 
     if (error instanceof CheckoutInputError) {
