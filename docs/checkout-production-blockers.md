@@ -11,6 +11,39 @@ Existing reservation-v1 attempts must continue through retry, resume, replacemen
 webhook finalization and reconciliation while the flag is off. Browser state is a tab-scoped
 capability cache; PostgreSQL and Stripe remain authoritative.
 
+### Reservation-v1 canary admission
+
+`CHECKOUT_RESERVATIONS_CANARY_SKUS` permits server-side admission of synthetic canary baskets while
+`CHECKOUT_RESERVATIONS_ENABLED` remains absent or false. Configure it as a strict JSON array with no
+more than 100 individually permitted product or variant SKUs, for example:
+
+```text
+CHECKOUT_RESERVATIONS_CANARY_SKUS='["TAA-CANARY-BASE","TAA-CANARY-VARIANT"]'
+```
+
+The value is server-only. It must never use a `VITE_` prefix or be returned to the browser. Matching
+uses exact, case-sensitive equality against the canonical active catalogue SKU returned from
+`products.sku` or `product_variants.variant_sku`. Every basket member must be allowlisted. A mixed
+canary and ordinary basket stays on the legacy path, and each variant must be allowlisted separately
+from its base product.
+
+Missing, blank, empty, malformed, non-array or excessive configuration disables new canary
+admission. Any non-string, empty, whitespace-only or over-200-character member invalidates the
+entire configuration. Ordinary and mixed baskets are rejected by a cheap submitted-SKU filter;
+potential all-canary baskets must still pass the existing canonical catalogue resolver before any
+durable reservation-v1 attempt is admitted. Catalogue validation and infrastructure failures remain
+fail closed and are not reinterpreted as successful legacy checkout.
+
+For rollout, keep `CHECKOUT_RESERVATIONS_ENABLED` absent or false, provision only synthetic SKUs,
+configure the exact server-side allowlist, and verify that ordinary and mixed baskets remain legacy
+before exercising canary payment and recovery. `CHECKOUT_RESERVATIONS_ENABLED=true` remains the
+global activation control and takes precedence over canary configuration.
+
+Rollback by removing or blanking `CHECKOUT_RESERVATIONS_CANARY_SKUS`. This prevents new canary
+reservation admissions while ordinary checkout remains legacy when the global flag is false.
+Existing authenticated reservation-v1 attempts always continue through reservation-v1 recovery,
+even after their SKU is removed, the canary configuration is disabled, or the global flag is false.
+
 Before enabling it in production:
 
 1. Deploy and verify the additive Slice 5C migration and both Edge Functions while the feature flag

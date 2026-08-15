@@ -8,6 +8,10 @@ import {
   resolveCanonicalCart,
 } from '../_shared/checkout-catalog.ts';
 import {
+  createReservationCanaryConfigurationReader,
+  decideCheckoutAdmission,
+} from '../_shared/checkout-admission.ts';
+import {
   CONFIRMATION_CAPABILITY_TTL_MS,
   authorizeCheckoutAccess,
   cleanCheckoutAddress,
@@ -37,7 +41,6 @@ import {
   CHECKOUT_WORKER_LEASE_RETRY_SECONDS,
   classifyStripeFailure,
   fingerprintCheckoutCommand,
-  getCheckoutProtocolRoute,
   getStripeFailureAction,
   getStripeIdempotencyKeys,
   getStripeSessionActivationAction,
@@ -110,6 +113,10 @@ function requireEnvironment(name: string) {
 
   return value;
 }
+
+const getCurrentReservationCanaryConfiguration = createReservationCanaryConfigurationReader({
+  readRawValue: () => Deno.env.get('CHECKOUT_RESERVATIONS_CANARY_SKUS'),
+});
 
 const stripe = new Stripe(requireEnvironment('STRIPE_SECRET_KEY'), {
   apiVersion: STRIPE_API_VERSION,
@@ -1471,44 +1478,36 @@ async function shouldUseReservationCheckout(request: Request, payload: Record<st
     Deno.env.get('CHECKOUT_RESERVATIONS_ENABLED')
   );
 
-  const initialRoute = getCheckoutProtocolRoute({
+  const decision = await decideCheckoutAdmission({
     operation,
     reservationsEnabled,
-    attemptExists: false,
-    existingAttemptProtocol: null,
+    attemptCredentialsSupplied: Boolean(
+      payload.checkout_attempt_id || payload.checkout_attempt_token
+    ),
+    getExistingAttemptProtocol: async () => {
+      const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
+      const attemptToken = getRequiredAttemptToken(payload);
+      const authenticatedUser = await getAuthenticatedUser(supabase, request);
+
+      return await callCheckoutRpc<{
+        attempt_exists: boolean;
+        checkout_protocol_version: string | null;
+      }>(supabase, 'get_checkout_attempt_protocol', {
+        p_checkout_attempt_id: checkoutAttemptId,
+        p_current_user_id: authenticatedUser?.id || null,
+        p_capability_hash: await sha256Hex(attemptToken),
+      });
+    },
+    getCanaryConfiguration: getCurrentReservationCanaryConfiguration,
+    cart: payload.cart,
+    resolveCanonicalCart: (cart) => resolveCanonicalCart(supabase, cart),
   });
 
-  if (initialRoute === 'reservation_v1') {
-    return { useReservationCheckout: true, attemptExists: false };
-  }
-  if (initialRoute === 'invalid') {
+  if (decision.route === 'invalid' && operation) {
     throw new CheckoutInputError('Checkout operation is invalid.');
   }
 
-  if (!payload.checkout_attempt_id && !payload.checkout_attempt_token) {
-    return { useReservationCheckout: false, attemptExists: false };
-  }
-
-  const checkoutAttemptId = normalizeUuid(payload.checkout_attempt_id, 'Checkout attempt ID');
-  const attemptToken = getRequiredAttemptToken(payload);
-  const authenticatedUser = await getAuthenticatedUser(supabase, request);
-  const protocol = await callCheckoutRpc<{
-    attempt_exists: boolean;
-    checkout_protocol_version: string | null;
-  }>(supabase, 'get_checkout_attempt_protocol', {
-    p_checkout_attempt_id: checkoutAttemptId,
-    p_current_user_id: authenticatedUser?.id || null,
-    p_capability_hash: await sha256Hex(attemptToken),
-  });
-
-  const existingRoute = getCheckoutProtocolRoute({
-    operation,
-    reservationsEnabled,
-    attemptExists: Boolean(protocol?.attempt_exists),
-    existingAttemptProtocol: protocol?.checkout_protocol_version || null,
-  });
-
-  if (existingRoute === 'invalid') {
+  if (decision.route === 'invalid') {
     throw new CheckoutProtocolRequestError(
       'Checkout attempt protocol is unavailable.',
       409,
@@ -1517,8 +1516,8 @@ async function shouldUseReservationCheckout(request: Request, payload: Record<st
   }
 
   return {
-    useReservationCheckout: existingRoute === 'reservation_v1',
-    attemptExists: Boolean(protocol?.attempt_exists),
+    useReservationCheckout: decision.route === 'reservation_v1',
+    attemptExists: decision.attemptExists,
   };
 }
 
