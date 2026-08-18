@@ -167,6 +167,44 @@ Reconciler rotation uses `CHECKOUT_RECONCILIATION_SECRET` as current and optiona
 secret after all callers have switched. Successful authentication remains a prerequisite to any
 job claim. Phase 6A creates no reconciliation schedule.
 
+### Exact-attempt operator recovery
+
+If a materialized reservation-v1 attempt loses its browser capability, operators must not fabricate
+a capability or mutate Stripe, attempt, intent, or reservation rows directly. The private
+`reconcile-checkout-reservations?mode=targeted` accepts an exact operator request containing only a
+`checkout_attempt_id`. The explicit query mode and non-empty exact JSON body are both required;
+omitting either fails with HTTP 400 instead of falling through to the legacy empty-body batch
+worker. It uses the same reconciliation secret as batch operation and calls
+`claim_checkout_attempt_reconciliation_job_v1`, which is executable only by `service_role`.
+
+Targeted mode does not run the global queue scan or expired-empty-attempt sweep. It claims durable
+work for only the requested attempt and current intent, respects an existing worker lease or retry
+delay, and then uses the existing reconciliation lifecycle. Stripe state is retrieved and fully
+validated. An open/unpaid Session is expired with the established deterministic idempotency key and
+retrieved again before PostgreSQL may release stock. Paid state follows paid finalization instead of
+abandonment. Transient or ambiguous state retains the reservation and leaves durable retry work;
+identity or integrity conflict remains in manual review.
+
+An in-flight intent with no locally recorded Session is still materialized when it belongs to the
+attempt and its attempt-owned reservation exists. Targeted recovery sends that state through the
+existing bounded Stripe Session discovery path; it must not classify an ambiguous external create
+as an empty attempt. After exhaustive no-match proof and hard expiry, a pre-checkpoint replacement
+is failed while its payable predecessor and reservation remain active, then the same targeted
+operation advances to that predecessor. An initial or post-checkpoint replacement terminalizes the
+whole attempt. Any inconsistent pointer/checkpoint topology enters manual review.
+
+An operator invocation is successful only when its response and a fresh database read agree that
+the attempt is terminal with a released reservation, or that authoritative paid finalization
+preserved a consumed reservation. Run one attempt at a time when recovery order matters, and stop
+before the next target on any retry, manual-review, or unexpected response. Supply the existing
+reconciliation secret through the operator process environment; never place it in command
+arguments, source, logs, documentation, or browser tooling.
+
+Production verification status: unauthenticated ingress has been verified to reject access with
+HTTP 401. An authenticated targeted production smoke using `CHECKOUT_RECONCILIATION_SECRET` has not
+yet been executed, so this path is not yet authenticated-production-proven. That handler-level
+smoke remains required before global reservations are enabled.
+
 ## Legacy endpoint retirement
 
 The following legacy Edge Functions have been retired remotely and removed from the deployable

@@ -3,11 +3,16 @@ import Stripe from 'npm:stripe@22.4.0';
 import { createClient } from 'npm:@supabase/supabase-js@2.112.2';
 import {
   CheckoutLifecycleValidationError,
-  classifyAuthoritativeCheckoutSession,
   isPaidInFlightReplacement,
-  validateAuthoritativeCheckoutSession,
   type CheckoutLifecycleCandidate,
 } from '../_shared/checkout-lifecycle.ts';
+import {
+  classifyTargetedRecoveryState,
+  getNoSessionRecoveryAction,
+  parseCheckoutOperatorRecoveryBody,
+  processKnownCheckoutSession,
+  type TargetedRecoveryState,
+} from '../_shared/checkout-operator-recovery.ts';
 import { resolvePaidActiveIntentReplacement } from '../_shared/checkout-paid-path.ts';
 import {
   PaidCheckoutSessionValidationError,
@@ -27,11 +32,18 @@ import {
   getStripeIdempotencyKeys,
   sha256Deterministic,
 } from '../_shared/checkout-protocol.ts';
+import {
+  HttpSecurityError,
+  readBoundedBody,
+  requireJsonContentType,
+} from '../_shared/http-security.ts';
 import { isBearerTokenAuthorized } from '../_shared/internal-auth.ts';
 
 const STRIPE_API_VERSION = '2026-07-29.dahlia';
 const MAX_DISCOVERY_PAGES = 5;
 const DISCOVERY_PAGE_SIZE = 100;
+const MAX_OPERATOR_BODY_BYTES = 1024;
+const MAX_TARGETED_INTENTS = 3;
 
 function requireEnvironment(name: string) {
   const value = Deno.env.get(name)?.trim();
@@ -57,6 +69,21 @@ type ReconciliationJob = {
   lifecycle_incident_id: string | null;
   reason: string;
   attempt_count: number;
+};
+
+type TargetedReconciliationClaim = ReconciliationJob & {
+  claim_state:
+    | 'claimed'
+    | 'already_claimed'
+    | 'operation_in_progress'
+    | 'retry_not_due'
+    | 'manual_review_required'
+    | 'already_terminal'
+    | 'already_paid'
+    | 'attempt_not_found'
+    | 'not_reservation_v1'
+    | 'not_materialized'
+    | 'integrity_review';
 };
 
 type ReconciliationIntent = {
@@ -197,6 +224,7 @@ async function loadLifecycleCandidateByIntentId(checkoutIntentId: string) {
 
 async function discoverCheckoutSession(
   intent: ReconciliationIntent,
+  lifecycleCandidate: CheckoutLifecycleCandidate,
   hardExpiresAt: string,
   workerLeaseId: string
 ) {
@@ -294,11 +322,36 @@ async function discoverCheckoutSession(
       }
 
       if (Date.now() > new Date(hardExpiresAt).getTime() + 5 * 60 * 1000) {
-        await callCheckoutRpc(supabase, 'terminalize_checkout_without_session', {
-          p_checkout_intent_id: intent.id,
-          p_worker_lease_id: workerLeaseId,
-          p_reason: 'hard_expiry_no_session_proven',
+        const recoveryAction = getNoSessionRecoveryAction({
+          checkoutIntentId: intent.id,
+          replacesCheckoutIntentId: intent.replaces_checkout_intent_id,
+          predecessorInvalidatedAt: intent.predecessor_invalidated_at,
+          activeCheckoutIntentId: lifecycleCandidate.active_checkout_intent_id,
+          inFlightCheckoutIntentId: lifecycleCandidate.in_flight_checkout_intent_id,
         });
+
+        if (recoveryAction === 'manual_review') {
+          await recordIncident(
+            intent,
+            'finalization_integrity_conflict',
+            'no_session_lifecycle_topology_conflict'
+          );
+          return { outcome: 'manual_review' as const, session: null };
+        }
+
+        await callCheckoutRpc(
+          supabase,
+          recoveryAction === 'fail_pre_checkpoint_replacement'
+            ? 'fail_checkout_request'
+            : 'terminalize_checkout_without_session',
+          {
+            p_checkout_intent_id: intent.id,
+            p_worker_lease_id: workerLeaseId,
+            ...(recoveryAction === 'fail_pre_checkpoint_replacement'
+              ? { p_failure_code: 'hard_expiry_no_session_proven' }
+              : { p_reason: 'hard_expiry_no_session_proven' }),
+          }
+        );
         return { outcome: 'resolved' as const, session: null };
       }
 
@@ -439,119 +492,113 @@ async function resolvePaidActiveIntentPath(
 async function processKnownSession(
   intent: ReconciliationIntent,
   lifecycleLeaseId: string,
-  reservationExpiresAt: string
+  lifecycle: Awaited<ReturnType<typeof loadLifecycleCandidate>>,
+  forceExpireOpenSession = false
 ) {
-  let session = await stripe.checkout.sessions.retrieve(intent.stripe_checkout_session_id!, {
-    expand: ['payment_intent.payment_method', 'shipping_cost.shipping_rate'],
-  });
-  const lifecycle = await loadLifecycleCandidate(intent);
+  return await processKnownCheckoutSession(
+    {
+      checkoutSessionId: intent.stripe_checkout_session_id!,
+      reservationExpiresAt: lifecycle.reservationExpiresAt,
+      forceExpireOpenSession,
+    },
+    {
+      retrieveSession: async (checkoutSessionId) =>
+        await stripe.checkout.sessions.retrieve(checkoutSessionId, {
+          expand: ['payment_intent.payment_method', 'shipping_cost.shipping_rate'],
+        }),
+      loadCandidate: async () => (await loadLifecycleCandidate(intent)).candidate,
+      expireSession: async (session) => {
+        await stripe.checkout.sessions.expire(
+          session.id,
+          {},
+          {
+            idempotencyKey: `taa-reconcile:${session.id}:expire`,
+          }
+        );
+      },
+      finalizeSession: async (session, candidate) => {
+        if (
+          isPaidInFlightReplacement(candidate) &&
+          !(await resolvePaidPredecessor(intent, candidate, lifecycleLeaseId))
+        ) {
+          return 'manual_review';
+        }
 
-  validateAuthoritativeCheckoutSession(session, lifecycle.candidate, {
-    requireCurrentPointer: false,
-  });
+        const resolvedActiveCandidate = await resolvePaidActiveIntentPath(intent, candidate);
 
-  let action = classifyAuthoritativeCheckoutSession(session);
+        if (!resolvedActiveCandidate) return 'manual_review';
 
-  if (action === 'retain' && new Date(reservationExpiresAt).getTime() <= Date.now()) {
-    await stripe.checkout.sessions.expire(
-      session.id,
-      {},
-      {
-        idempotencyKey: `taa-reconcile:${session.id}:expire`,
-      }
-    );
-    session = await stripe.checkout.sessions.retrieve(session.id, {
-      expand: ['payment_intent.payment_method', 'shipping_cost.shipping_rate'],
-    });
-    validateAuthoritativeCheckoutSession(session, lifecycle.candidate, {
-      requireCurrentPointer: false,
-    });
-    action = classifyAuthoritativeCheckoutSession(session);
-  }
+        const paymentIntent =
+          typeof session.payment_intent === 'string'
+            ? await stripe.paymentIntents.retrieve(session.payment_intent, {
+                expand: ['payment_method'],
+              })
+            : session.payment_intent;
+        await validateAndSynchronizePaidCheckoutSession({
+          supabase,
+          session,
+          paymentIntent,
+          candidate: resolvedActiveCandidate,
+          retrieveShippingRate: async (shippingRateId) =>
+            await stripe.shippingRates.retrieve(shippingRateId),
+        });
+        const paymentMethod =
+          paymentIntent?.payment_method && typeof paymentIntent.payment_method !== 'string'
+            ? paymentIntent.payment_method
+            : null;
+        const card = paymentMethod?.card;
+        const { data, error } = await supabase.rpc('finalize_paid_checkout', {
+          p_checkout_session_id: session.id,
+          p_payment_intent_id: paymentIntent?.id || null,
+          p_stripe_customer_id: getResourceId(session.customer),
+          p_payment_method_type: paymentMethod?.type || null,
+          p_payment_brand: card?.brand || null,
+          p_payment_last4: card?.last4 || null,
+          p_payment_exp_month: card?.exp_month || null,
+          p_payment_exp_year: card?.exp_year || null,
+        });
 
-  if (action === 'finalize') {
-    if (
-      isPaidInFlightReplacement(lifecycle.candidate) &&
-      !(await resolvePaidPredecessor(intent, lifecycle.candidate, lifecycleLeaseId))
-    ) {
-      return 'manual_review' as const;
+        if (error || !data?.[0]) throw new Error('Paid checkout reconciliation failed.');
+
+        return data[0].finalization_outcome === 'manual_review_required'
+          ? 'manual_review'
+          : 'resolved';
+      },
+      markPaymentPending: async (session) => {
+        await callCheckoutRpc(supabase, 'mark_checkout_payment_pending', {
+          p_checkout_session_id: session.id,
+          p_payment_intent_id: getResourceId(session.payment_intent),
+        });
+      },
+      transitionTerminal: async (session) => {
+        await callCheckoutRpc(supabase, 'transition_checkout_session_terminal', {
+          p_checkout_session_id: session.id,
+          p_reason: 'expired_unpaid',
+        });
+      },
+      recordUnsupportedState: async (session) => {
+        await recordIncident(
+          intent,
+          'stripe_session_match_conflict',
+          'unsupported_authoritative_session_state',
+          getResourceId(session.payment_intent)
+        );
+      },
     }
-
-    const resolvedActiveCandidate = await resolvePaidActiveIntentPath(intent, lifecycle.candidate);
-
-    if (!resolvedActiveCandidate) return 'manual_review' as const;
-
-    const paymentIntent =
-      typeof session.payment_intent === 'string'
-        ? await stripe.paymentIntents.retrieve(session.payment_intent, {
-            expand: ['payment_method'],
-          })
-        : session.payment_intent;
-    await validateAndSynchronizePaidCheckoutSession({
-      supabase,
-      session,
-      paymentIntent,
-      candidate: resolvedActiveCandidate,
-      retrieveShippingRate: async (shippingRateId) =>
-        await stripe.shippingRates.retrieve(shippingRateId),
-    });
-    const paymentMethod =
-      paymentIntent?.payment_method && typeof paymentIntent.payment_method !== 'string'
-        ? paymentIntent.payment_method
-        : null;
-    const card = paymentMethod?.card;
-    const { data, error } = await supabase.rpc('finalize_paid_checkout', {
-      p_checkout_session_id: session.id,
-      p_payment_intent_id: paymentIntent?.id || null,
-      p_stripe_customer_id: getResourceId(session.customer),
-      p_payment_method_type: paymentMethod?.type || null,
-      p_payment_brand: card?.brand || null,
-      p_payment_last4: card?.last4 || null,
-      p_payment_exp_month: card?.exp_month || null,
-      p_payment_exp_year: card?.exp_year || null,
-    });
-
-    if (error || !data?.[0]) throw new Error('Paid checkout reconciliation failed.');
-
-    return data[0].finalization_outcome === 'manual_review_required'
-      ? ('manual_review' as const)
-      : ('resolved' as const);
-  }
-
-  if (action === 'payment_pending') {
-    await callCheckoutRpc(supabase, 'mark_checkout_payment_pending', {
-      p_checkout_session_id: session.id,
-      p_payment_intent_id: getResourceId(session.payment_intent),
-    });
-    return 'retry' as const;
-  }
-
-  if (action === 'expired_unpaid') {
-    await callCheckoutRpc(supabase, 'transition_checkout_session_terminal', {
-      p_checkout_session_id: session.id,
-      p_reason: 'expired_unpaid',
-    });
-    return 'resolved' as const;
-  }
-
-  if (action === 'retain') return 'retry' as const;
-
-  await recordIncident(
-    intent,
-    'stripe_session_match_conflict',
-    'unsupported_authoritative_session_state',
-    getResourceId(session.payment_intent)
   );
-  return 'manual_review' as const;
 }
 
-async function processJob(job: ReconciliationJob, queueWorkerLeaseId: string) {
+async function processJob(
+  job: ReconciliationJob,
+  queueWorkerLeaseId: string,
+  { forceExpireOpenSession = false }: { forceExpireOpenSession?: boolean } = {}
+) {
   const lifecycleLeaseId = createLifecycleLeaseId();
   const intent = await loadReconciliationIntent(job);
 
   if (!intent) {
     await completeJob(job, queueWorkerLeaseId, 'manual_review', 'reconciliation_intent_missing');
-    return;
+    return 'manual_review' as const;
   }
 
   try {
@@ -560,6 +607,7 @@ async function processJob(job: ReconciliationJob, queueWorkerLeaseId: string) {
     if (!intent.stripe_checkout_session_id) {
       const discovery = await discoverCheckoutSession(
         intent,
+        lifecycle.candidate,
         lifecycle.hardExpiresAt,
         lifecycleLeaseId
       );
@@ -574,15 +622,21 @@ async function processJob(job: ReconciliationJob, queueWorkerLeaseId: string) {
             : 'retry',
         discovery.outcome
       );
-      return;
+      return discovery.outcome === 'resolved'
+        ? ('resolved' as const)
+        : discovery.outcome === 'manual_review'
+          ? ('manual_review' as const)
+          : ('retry' as const);
     }
 
     const outcome = await processKnownSession(
       intent,
       lifecycleLeaseId,
-      lifecycle.reservationExpiresAt
+      lifecycle,
+      forceExpireOpenSession
     );
     await completeJob(job, queueWorkerLeaseId, outcome, null);
+    return outcome;
   } catch (error) {
     if (
       error instanceof CheckoutLifecycleValidationError ||
@@ -590,7 +644,7 @@ async function processJob(job: ReconciliationJob, queueWorkerLeaseId: string) {
     ) {
       await recordIncident(intent, 'stripe_session_match_conflict', error.code);
       await completeJob(job, queueWorkerLeaseId, 'manual_review', error.code);
-      return;
+      return 'manual_review' as const;
     }
 
     console.error('CHECKOUT RECONCILIATION JOB FAILED:', {
@@ -600,12 +654,195 @@ async function processJob(job: ReconciliationJob, queueWorkerLeaseId: string) {
       error_name: error instanceof Error ? error.name : 'unknown',
     });
     await completeJob(job, queueWorkerLeaseId, 'retry', 'reconciliation_retry');
+    return 'retry' as const;
   }
+}
+
+async function loadTargetedRecoveryState(
+  checkoutAttemptId: string
+): Promise<TargetedRecoveryState> {
+  const { data: attempt, error: attemptError } = await supabase
+    .from('checkout_attempts')
+    .select('status, active_checkout_intent_id, in_flight_checkout_intent_id')
+    .eq('id', checkoutAttemptId)
+    .maybeSingle();
+
+  if (attemptError || !attempt) {
+    throw new Error('Targeted reconciliation attempt state could not be loaded.');
+  }
+
+  const { data: reservation, error: reservationError } = await supabase
+    .from('inventory_reservations')
+    .select('status, order_id')
+    .eq('checkout_attempt_id', checkoutAttemptId)
+    .maybeSingle();
+
+  if (reservationError) {
+    throw new Error('Targeted reconciliation reservation state could not be loaded.');
+  }
+
+  const { data: intents, error: intentError } = await supabase
+    .from('checkout_intents')
+    .select('id, status, orchestration_state')
+    .eq('checkout_attempt_id', checkoutAttemptId);
+
+  if (intentError || !intents) {
+    throw new Error('Targeted reconciliation intent state could not be loaded.');
+  }
+
+  const { data: orders, error: orderError } = await supabase
+    .from('orders')
+    .select('id, checkout_intent_id')
+    .eq('checkout_attempt_id', checkoutAttemptId);
+
+  if (orderError || !orders) {
+    throw new Error('Targeted reconciliation order state could not be loaded.');
+  }
+
+  const { count: manualReviewJobCount, error: manualReviewError } = await supabase
+    .from('checkout_reconciliation_jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('checkout_attempt_id', checkoutAttemptId)
+    .eq('status', 'manual_review');
+
+  if (manualReviewError || manualReviewJobCount === null) {
+    throw new Error('Targeted reconciliation review state could not be loaded.');
+  }
+
+  return {
+    attemptStatus: attempt.status,
+    activeCheckoutIntentId: attempt.active_checkout_intent_id,
+    inFlightCheckoutIntentId: attempt.in_flight_checkout_intent_id,
+    reservationStatus: reservation?.status || null,
+    reservationOrderId: reservation?.order_id || null,
+    intents: intents.map((intent) => ({
+      id: intent.id,
+      status: intent.status,
+      orchestrationState: intent.orchestration_state,
+    })),
+    orders: orders.map((order) => ({
+      id: order.id,
+      checkoutIntentId: order.checkout_intent_id,
+    })),
+    manualReviewJobCount,
+  };
+}
+
+function targetedResponse(result: string, status = 200) {
+  return Response.json({ mode: 'targeted', result }, { status });
+}
+
+async function processTargetedAttempt(checkoutAttemptId: string) {
+  for (let index = 0; index < MAX_TARGETED_INTENTS; index += 1) {
+    const queueWorkerLeaseId = crypto.randomUUID();
+    const claim = await callCheckoutRpc<TargetedReconciliationClaim>(
+      supabase,
+      'claim_checkout_attempt_reconciliation_job_v1',
+      {
+        p_checkout_attempt_id: checkoutAttemptId,
+        p_worker_lease_id: queueWorkerLeaseId,
+      }
+    );
+
+    if (!claim) throw new Error('Targeted reconciliation claim returned no result.');
+
+    if (claim.claim_state === 'attempt_not_found') {
+      return targetedResponse('attempt_not_found', 404);
+    }
+
+    if (claim.claim_state === 'not_reservation_v1' || claim.claim_state === 'not_materialized') {
+      return targetedResponse(claim.claim_state, 409);
+    }
+
+    if (
+      claim.claim_state === 'integrity_review' ||
+      claim.claim_state === 'manual_review_required'
+    ) {
+      return targetedResponse('manual_review_required', 409);
+    }
+
+    if (claim.claim_state === 'operation_in_progress' || claim.claim_state === 'retry_not_due') {
+      return targetedResponse('reconciliation_pending', 202);
+    }
+
+    if (claim.claim_state === 'already_terminal') {
+      return targetedResponse('already_terminal');
+    }
+
+    if (claim.claim_state === 'already_paid') {
+      return targetedResponse('paid_preserved');
+    }
+
+    if (
+      (claim.claim_state !== 'claimed' && claim.claim_state !== 'already_claimed') ||
+      !claim.job_id ||
+      !claim.checkout_intent_id
+    ) {
+      throw new Error('Targeted reconciliation claim is invalid.');
+    }
+
+    const outcome = await processJob(claim, queueWorkerLeaseId, {
+      forceExpireOpenSession: true,
+    });
+
+    if (outcome === 'retry') return targetedResponse('reconciliation_pending', 202);
+    if (outcome === 'manual_review') return targetedResponse('manual_review_required', 409);
+
+    const state = await loadTargetedRecoveryState(checkoutAttemptId);
+    const result = classifyTargetedRecoveryState(state);
+
+    if (result === 'recovered' || result === 'paid_preserved') {
+      return targetedResponse(result);
+    }
+
+    if (result === 'integrity_review') {
+      return targetedResponse('manual_review_required', 409);
+    }
+
+    const nextIntentId = state.inFlightCheckoutIntentId || state.activeCheckoutIntentId;
+
+    if (!nextIntentId || nextIntentId === claim.checkout_intent_id) {
+      return targetedResponse('reconciliation_pending', 202);
+    }
+  }
+
+  return targetedResponse('reconciliation_pending', 202);
 }
 
 serve(async (request) => {
   if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
   if (!authorized(request)) return new Response('Unauthorized', { status: 401 });
+
+  let requestMode;
+
+  try {
+    const rawBody = await readBoundedBody(request, MAX_OPERATOR_BODY_BYTES);
+
+    if (rawBody.trim()) requireJsonContentType(request);
+
+    requestMode = parseCheckoutOperatorRecoveryBody(
+      rawBody,
+      new URL(request.url).searchParams.get('mode')
+    );
+  } catch (error) {
+    if (error instanceof HttpSecurityError) {
+      return Response.json({ error: error.message }, { status: error.status });
+    }
+
+    return Response.json({ error: 'Invalid reconciliation request.' }, { status: 400 });
+  }
+
+  if (requestMode.mode === 'targeted') {
+    try {
+      return await processTargetedAttempt(requestMode.checkoutAttemptId);
+    } catch (error) {
+      console.error('TARGETED CHECKOUT RECONCILIATION FAILED:', {
+        checkout_attempt_id: requestMode.checkoutAttemptId,
+        error_name: error instanceof Error ? error.name : 'unknown',
+      });
+      return targetedResponse('reconciliation_failed', 500);
+    }
+  }
 
   let expiredEmptyAttemptsTerminalized = 0;
 
