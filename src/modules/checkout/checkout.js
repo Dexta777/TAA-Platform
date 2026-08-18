@@ -41,6 +41,7 @@ import {
   recoverCheckoutOperationBeforeFreshState,
   requestCurrentCheckoutOperation,
 } from './checkout-operation.js';
+import { resetCheckoutAttemptEnvelope } from './checkout-reset.js';
 import { createCheckoutShipping } from './checkout-shipping.js';
 import { createCheckoutSummary } from './checkout-summary.js';
 import { validateCheckout } from './checkout-validation.js';
@@ -131,6 +132,7 @@ export async function initCheckout({
     createCheckoutSession: createCheckoutSessionDependency = createCheckoutSession,
     getCart: getCartDependency = getCart,
     getShippingOptions: getShippingOptionsDependency = getShippingOptions,
+    onCartChanged: onCartChangedDependency = () => {},
     removeCartItems: removeCartItemsDependency = removeCartItems,
     resumeCheckoutSession: resumeCheckoutSessionDependency = resumeCheckoutSession,
     updateCheckoutDetails: updateCheckoutDetailsDependency = updateCheckoutDetails,
@@ -704,28 +706,13 @@ export async function initCheckout({
     window.location.assign(confirmationUrl);
   }
 
-  async function resetChangedCartAttempt() {
-    if (!checkoutEnvelope) return true;
-
-    setCheckoutControlsBusy(true);
-    setPayButton('Resetting Checkout...', true);
-
-    const result = await abandonCheckoutAttemptDependency({
-      checkoutAttemptId: checkoutEnvelope.attempt.checkoutAttemptId,
-      checkoutAttemptToken: checkoutEnvelope.attempt.checkoutAttemptToken,
-    });
-
-    if (result.result === 'already_paid') {
-      navigateToConfirmation(checkoutEnvelope.activeCheckout?.checkoutSessionId);
-      return false;
-    }
-
-    if (!['abandoned', 'already_terminal', 'attempt_not_found'].includes(result.result)) {
-      throw new Error('Checkout is still being reconciled. Please try again shortly.');
-    }
-
-    clearCheckoutAttempt();
+  function clearRuntimeCheckoutStateAfterReset() {
     cart = getCartDependency();
+    checkoutEnvelope = null;
+    currentCommand = null;
+    cartFingerprint = '';
+    state.protocolMode = 'negotiating';
+    state.reservationCommitted = false;
     state.paymentElement?.destroy();
     paymentElementWrapper.replaceChildren();
     state.actions = null;
@@ -741,13 +728,36 @@ export async function initCheckout({
     summary.renderDiscount(null);
     discountController.clearDiscount();
     inventoryConflictController.hide();
+  }
+
+  async function abandonCurrentCheckoutAttempt() {
+    if (!checkoutEnvelope) return Object.freeze({ status: 'no_attempt' });
+
+    setCheckoutControlsBusy(true);
+    setPayButton('Resetting Checkout...', true);
+
+    const reset = await resetCheckoutAttemptEnvelope(checkoutEnvelope, {
+      dependencies: {
+        abandonCheckoutAttempt: abandonCheckoutAttemptDependency,
+        clearCheckoutAttempt,
+      },
+    });
+
+    if (reset.status === 'already_paid') {
+      navigateToConfirmation(checkoutEnvelope.activeCheckout?.checkoutSessionId);
+      return reset;
+    }
+
+    clearRuntimeCheckoutStateAfterReset();
+    return reset;
+  }
+
+  async function resetChangedCartAttempt() {
+    const reset = await abandonCurrentCheckoutAttempt();
+
+    if (reset.status === 'already_paid') return false;
 
     if (cart.length === 0) {
-      cartFingerprint = '';
-      checkoutEnvelope = null;
-      currentCommand = null;
-      state.protocolMode = 'negotiating';
-      state.reservationCommitted = false;
       return true;
     }
 
@@ -795,6 +805,8 @@ export async function initCheckout({
           inventoryConflictController.hide();
           showError('Your basket changed. Please review it before continuing.');
           setPayButton('Payment Unavailable', true);
+        } else {
+          await onCartChangedDependency(outcome.cart);
         }
       } catch (error) {
         console.error('Checkout inventory conflict removal failed:', error);
@@ -1211,6 +1223,15 @@ export async function initCheckout({
   return Object.freeze({
     getCheckoutSession() {
       return state.actions?.getSession() || null;
+    },
+    resetCheckoutAttempt() {
+      return runCheckoutMutation(async () => {
+        try {
+          return await abandonCurrentCheckoutAttempt();
+        } finally {
+          setCheckoutControlsBusy(false);
+        }
+      });
     },
   });
 }

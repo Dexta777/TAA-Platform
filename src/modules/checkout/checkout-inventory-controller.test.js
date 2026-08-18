@@ -359,6 +359,7 @@ test('real checkout controller continues without one item through explicit reset
   const fixture = createFixture({ cart, conflictMarkup: 'complete' });
   let shippingCalls = 0;
   let abandonmentCalls = 0;
+  const observedCarts = [];
   const controller = await initCheckout({
     root: fixture.root,
     dependencies: {
@@ -373,6 +374,7 @@ test('real checkout controller continues without one item through explicit reset
         }
         return shippingResult(currentCart);
       },
+      onCartChanged: (currentCart) => observedCarts.push(currentCart),
     },
   });
 
@@ -385,8 +387,9 @@ test('real checkout controller continues without one item through explicit reset
   const nextEnvelope = JSON.parse(fixture.sessionStorage.getItem('taa_checkout_attempt_v1'));
 
   assert.deepEqual(JSON.parse(fixture.storage.getItem('taa_cart')), [cart[0], cart[2]]);
-  assert.equal(abandonmentCalls, 1);
+  assert.equal(abandonmentCalls, 0);
   assert.equal(shippingCalls, 2);
+  assert.deepEqual(observedCarts, [[cart[0], cart[2]]]);
   assert.equal(fixture.payButton.textContent, 'Select Shipping');
   assert.notEqual(nextEnvelope.attempt.checkoutAttemptId, firstEnvelope.attempt.checkoutAttemptId);
   assert.notEqual(nextEnvelope.attempt.cartFingerprint, firstEnvelope.attempt.cartFingerprint);
@@ -404,12 +407,19 @@ test('real checkout controller removes an all-unavailable basket without fresh c
         abandonmentCalls += 1;
         return { result: 'abandoned' };
       },
-      getShippingOptions: async () => {
-        shippingCalls += 1;
+      createCheckoutSession: async () => {
         throw physicalConflict([{ sku: 'B', reason: 'out_of_stock' }]);
+      },
+      getShippingOptions: async (currentCart) => {
+        shippingCalls += 1;
+        return shippingResult(currentCart);
       },
     },
   });
+
+  fixture.shippingRadio.checked = true;
+  await fixture.shippingRadio.dispatch('change');
+  await waitFor(() => fixture.conflictRegion.attributes.has('data-ui-hidden') === false);
 
   const firstClick = fixture.continueButton.dispatch('click');
   const secondClick = fixture.continueButton.dispatch('click');
@@ -486,6 +496,36 @@ test('real checkout controller preserves payable success after rapid retry click
   assert.equal(fixture.conflictRegion.attributes.get('data-ui-hidden'), 'true');
   assert.equal(fixture.payButton.textContent, 'Place Order');
   assert.ok(controller.getCheckoutSession());
+});
+
+test('controller reset capability abandons an active checkout without clearing its cart', async () => {
+  const activeCart = [cart[1]];
+  const fixture = createFixture({ cart: activeCart, conflictMarkup: 'complete' });
+  let abandonmentCalls = 0;
+  const controller = await initCheckout({
+    root: fixture.root,
+    dependencies: {
+      abandonCheckoutAttempt: async () => {
+        abandonmentCalls += 1;
+        return { result: 'abandoned' };
+      },
+      createCheckoutElementsSdk: createStripeElementsDependency(),
+      createCheckoutSession: async (payload) => reservationCheckoutResult(payload, activeCart),
+      getShippingOptions: async () => shippingResult(activeCart),
+    },
+  });
+
+  fixture.shippingRadio.checked = true;
+  await fixture.shippingRadio.dispatch('change');
+  await waitFor(() => fixture.payButton.textContent === 'Place Order');
+
+  const reset = await controller.resetCheckoutAttempt();
+
+  assert.equal(reset.status, 'abandoned');
+  assert.equal(abandonmentCalls, 1);
+  assert.deepEqual(JSON.parse(fixture.storage.getItem('taa_cart')), activeCart);
+  assert.equal(fixture.sessionStorage.getItem('taa_checkout_attempt_v1'), null);
+  assert.equal(fixture.paymentWrapper.children.length, 0);
 });
 
 for (const conflictMarkup of ['absent', 'partial']) {

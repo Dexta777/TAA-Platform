@@ -6,6 +6,8 @@ async function runBootstrap() {
   initCartUi();
 
   const initializers = [];
+  const checkoutRoot = document.querySelector('[data-checkout-root="true"]');
+  const normalizedPathname = window.location.pathname.replace(/\/+$/, '') || '/';
 
   if (document.querySelector('[data-product-sku]')) {
     initializers.push(
@@ -22,14 +24,42 @@ async function runBootstrap() {
     );
   }
 
-  if (document.querySelector('[data-checkout-root="true"]')) {
+  if (checkoutRoot) {
     initializers.push(
       (async () => {
+        let canaryFixture = null;
+        let checkoutController = null;
+
         try {
           const { initCheckout } = await import('../modules/checkout/checkout.js');
-          await initCheckout();
+          checkoutController = await initCheckout({
+            root: checkoutRoot,
+            dependencies:
+              normalizedPathname === '/checkout-test'
+                ? {
+                    onCartChanged: () => canaryFixture?.render(),
+                  }
+                : {},
+          });
         } catch (error) {
           console.error('Checkout initialization failed:', error);
+        }
+
+        if (normalizedPathname === '/checkout-test') {
+          try {
+            const { initCheckoutCanaryFixture } =
+              await import('../modules/checkout/checkout-canary-fixture.js');
+            canaryFixture = initCheckoutCanaryFixture({
+              root: checkoutRoot,
+              dependencies: checkoutController
+                ? {
+                    resetCheckoutAttempt: () => checkoutController.resetCheckoutAttempt(),
+                  }
+                : {},
+            });
+          } catch (error) {
+            console.error('Checkout canary fixture initialization failed:', error);
+          }
         }
       })()
     );
