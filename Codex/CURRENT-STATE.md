@@ -19,16 +19,20 @@ have been corrected, focused production re-verification is complete, and the man
 reconciliation scheduler plus dual-layer heartbeat are production-active. The database-native
 lifecycle monitor and explicit rollback thresholds are also production-active and verified. The
 remaining global-enable readiness work is an authenticated external alert route with an independent
-critical fallback, three bounded human-readiness actions, and an explicit launch decision—not another
-repetition of already-closed payment or recovery scenarios. The authoritative operator/incident
-runbook is committed and has passed source-consistency, security, focused validation and tabletop
-review. A human-access review now records where primary and failsafe operation is and is not proven.
+critical fallback, three bounded human-readiness action streams, and an explicit launch decision—not
+another repetition of already-closed payment or recovery scenarios. The authoritative
+operator/incident runbook is committed and has passed source-consistency, security, focused
+validation and tabletop review. Model B now has a local, undeployed implementation; it is not yet an
+available or production-proven failsafe.
 
 ## Git and Deployment State
 
-- `origin/main` remains at `21e1b5b6f0de7ec082567a9da9491c67cbbce34b`. Local `main` contains the
-  unpublished human-failover requirements commit `15929c3cc5f11f6a25e64b71eb185d946efd8fed`;
-  this project-memory record is its separate follow-on evidence boundary.
+- Before the local Model B work, `main` and `origin/main` were synchronized at
+  `592e367b8467e10a0240befedb1cc03c47769369`. Local commit
+  `f177965bf6d1064a4899ba679242814f6ef66c5b` now represents the reviewed Model B infrastructure,
+  tests and operational documentation; this project-memory update is its separate evidence
+  boundary. The Model B source-control work remains local and unpushed. No deployment or cloud
+  mutation occurred.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -73,7 +77,7 @@ or repeated merely to improve labels without a documented safe runtime mechanism
   evidence.
 - Reservation-v1 lifecycle monitor and objective rollback thresholds: PRODUCTION ACTIVE / CLOSED.
 - Authoritative reservation-v1 operator and incident-response runbook: REVIEWED / TABLETOP VERIFIED
-  / COMMITTED LOCALLY; documentation blocker CLOSED.
+  / COMMITTED; documentation blocker CLOSED.
 - Reservation ownership, replacement lineage, paid finalization, unpaid release, browser recovery,
   confirmation capability and canary admission boundaries have the evidence grades recorded above.
 
@@ -202,8 +206,13 @@ TAA launch model unless they become dependencies of the checkout alert path.
 
 The three remaining human action streams are:
 
-1. Meg has no verified one-way rollback control; Model B is required because escalation-only Model A
-   cannot meet the five-minute SLA when Dexter is unreachable;
+1. Model B is implemented locally with a fixed DELETE-only Lambda, zero-parameter SSM Automation,
+   immutable Lambda-version invocation, and MFA/version-bounded Meg policy and matching permissions
+   boundary. Both policies require fixed execution tag `TAA-Control=CheckoutModelB` and limit receipt
+   reads to matching Model B executions without broad execution listing or retagging permission. It
+   is not deployed, not available to Meg and not production-proven. Closure still requires token
+   project-scope verification, non-production present/absent idempotency proof, IAM simulation,
+   deployment, OFF-state production proof and a supervised Meg FIDO drill;
 2. no authoritative two-human password-manager/account-recovery route independent of Dexter's Mac
    or primary MFA device is evidenced;
 3. Dexter's named Stripe live/test access, MFA, account recovery, refund/manual-fulfilment authority
@@ -217,21 +226,26 @@ deleting reviewed inactive credentials, and retiring legacy `APEX1.0`/`apex-ses`
 recommended post-launch hardening unless their ownership or use becomes part of the checkout alert
 path.
 
-Model B must expose only an authenticated, audited, idempotent removal of
-`CHECKOUT_RESERVATIONS_ENABLED`; it must never give Meg general Supabase, database, AWS, Stripe,
-scheduler, deployment, or secret-read access. The six human-failover tabletops passed only when
-Dexter and his current Mac were available or when the runbook alone was the dependency. Meg
-unreachable-primary, alternate-device and credential-recovery scenarios remain blocked. Human
-readiness still requires Model B, tested two-human recovery and Stripe operational authority. The
-launch-critical AWS human-key condition is satisfied while Brad's long-lived key remains inactive;
-external alert delivery must use a purpose-specific credential rather than that broad human key.
+The local Model B source enforces only an authenticated removal of
+`CHECKOUT_RESERVATIONS_ENABLED`: the Management API origin, production project configuration,
+secret name, DELETE method and request body are server-side fixed; all non-empty caller input is
+rejected. The credential is modeled in the dedicated AWS secret
+`taa/model-b/supabase-management-token` and requires `edge_functions_secrets_write` only. No Edge
+secret GET/list or `edge_functions_secrets_read` is used. The local safe receipt is credential-free,
+but idempotent already-absent deletion must still be proven against a non-production test flag. The
+six human-failover tabletops passed only when Dexter and his current Mac were available or when the
+runbook alone was the dependency. Meg unreachable-primary, alternate-device and
+credential-recovery scenarios remain blocked. Human readiness still requires deployed/proven Model
+B, tested two-human recovery and Stripe operational authority. The launch-critical AWS human-key
+condition is satisfied while Brad's long-lived key remains inactive; external alert delivery must
+use a purpose-specific credential rather than that broad human key.
 
 The lifecycle monitoring/rollback-threshold blocker is closed. Database monitoring deliberately
 does not claim an HTTP checkout error-rate because no accurate request denominator is persisted.
 Remaining readiness gates are authenticated external log/alert routing with an independent critical
-fallback; Model B and tested two-human recovery; Stripe operational authority; and separate explicit
-global-enable authorisation. Global reservation enablement remains blocked until those gates are
-completed and reviewed.
+fallback; Model B integration/deployment/proof and tested two-human recovery; Stripe operational
+authority; and separate explicit global-enable authorisation. Global reservation enablement remains
+blocked until those gates are completed and reviewed.
 
 ## Separate Security Follow-up
 
@@ -280,14 +294,16 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 - Do not repeat A/D/E/F/G/H, 7C1 or targeted recovery without a new evidence need.
 - Do not upgrade B/C/I/J beyond their recorded evidence layers.
 - Do not deploy the local diagnostic commit without a separate review and deployment instruction.
+- Do not treat local Model B tests as AWS, Supabase, deployment, runtime, or production evidence.
 - Always inspect `git status --short` and current Git history before attributing evidence.
 
 ## Exact Next Action
 
-Review the AWS credential-hardening evidence commit, then push only under separate authorization.
-Next, build and drill Meg's one-way Model B rollback control; establish tested two-human account
-recovery; verify Dexter's Stripe incident/refund/fulfilment authority; and complete SNS-backed
-external alert delivery using purpose-specific credentials. Treat narrower AWS
-privilege/federation and deletion of reviewed inactive identities as post-launch hardening unless a
-broad credential is proposed for the alert path. Require a separate global-enable decision after
-every launch gate closes. Global reservations remain off.
+Perform a final read-only pre-push review of the two local Model B provenance commits. If approved,
+push only under separate authorization. Then use a separate non-production task to verify
+fine-grained token project scoping and prove present/absent DELETE idempotency without secret-read
+permission; review deployment-time IAM simulation and change-set evidence before any production
+deployment. In parallel, establish tested two-human account recovery, verify Dexter's Stripe
+incident/refund/fulfilment authority, and complete SNS-backed external alert delivery with
+purpose-specific credentials. Require a separate global-enable decision after every launch gate
+closes. Global reservations remain off.

@@ -53,6 +53,81 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-19 — Model B Emergency Checkout Rollback Implemented and Verified Locally
+
+**Record type:** LOCAL COMMITTED SOURCE, UNIT, STRUCTURED STATIC IAM AND OFFLINE TEMPLATE EVIDENCE
+**Evidence grade:** LOCAL ONLY; NO AWS, SUPABASE, DEPLOYMENT, RUNTIME OR PRODUCTION PROOF
+**Status:** IMPLEMENTED LOCALLY / NOT DEPLOYED / NOT PRODUCTION-PROVEN
+
+The work began from clean synchronized `main` and `origin/main` at
+`592e367b8467e10a0240befedb1cc03c47769369`, with nothing staged. Source inspection reconfirmed that
+`CHECKOUT_RESERVATIONS_ENABLED` enables global reservation admission only when its normalized value
+is exactly `true`; absence routes genuinely new ordinary attempts to legacy while existing
+reservation-v1 attempts remain on reservation-v1.
+
+Local implementation commit `f177965bf6d1064a4899ba679242814f6ef66c5b` adds
+`infra/checkout-model-b` and `docs/checkout-model-b-rollback.md`, and updates the operator runbook and
+production-blocker record. No checkout runtime file changed. The local architecture is a named
+console-only Meg IAM identity with an MFA-gated policy and matching permissions boundary, version
+`1` of zero-parameter SSM Automation document `TAA-EmergencyDisableCheckoutReservations`, an exact
+Automation execution role, an immutable Lambda version, and a Lambda role limited to the dedicated
+AWS secret `taa/model-b/supabase-management-token` plus its receipt log group.
+
+The handler rejects non-empty caller input. Its Management API origin, production project
+configuration, secret name `CHECKOUT_RESERVATIONS_ENABLED`, `DELETE` method and one-name JSON body
+are fixed server-side. It accepts only HTTP 200, never issues a secret GET/list, never reads a
+provider response body, and fails closed on malformed configuration, missing credentials, network
+error, timeout, 401, 403, 429 and every other status. The safe success receipt contains only the
+action, `OFF_CONFIRMED`, `verified_off`, a generated UUID and UTC completion time. The required
+Supabase fine-grained permission is `edge_functions_secrets_write`; `edge_functions_secrets_read`
+is not used.
+
+A subsequent read-only security review identified one HIGH local IAM issue: the initial Meg policy
+and boundary allowed receipt reads across unconditioned `automation-execution/*`. Commit
+`f177965bf6d1064a4899ba679242814f6ef66c5b` contains the corrected scope. Both policies require
+request tag `TAA-Control=CheckoutModelB`, constrain `aws:TagKeys` to that single key, and require the
+matching resource tag for `GetAutomationExecution` and `DescribeAutomationStepExecutions`. Meg receives neither
+`DescribeAutomationExecutions` nor `AddTagsToResource`. The execution tag is authorization metadata;
+the Automation document remains zero-parameter and its rollback operation is unchanged.
+
+A final read-only provenance/security review of the corrected tree returned **APPROVE LOCAL
+IMPLEMENTATION**, with zero BLOCKER, HIGH, MEDIUM, LOW or NIT findings. Verification of the exact
+source staged and committed as `f177965bf6d1064a4899ba679242814f6ef66c5b` under Node 22 produced:
+
+- Model B handler and structured infrastructure-policy tests: 24/24 PASS;
+- ESLint for the handler and tests: PASS;
+- pinned `@aws-sdk/client-secrets-manager@3.1109.0` clean install and import smoke: PASS;
+- pinned test-only `yaml@2.9.0` parser install and npm audit: PASS, zero vulnerabilities;
+- YAML syntax parse: PASS;
+- offline SAM translation using the installed translator with a non-network managed-policy loader:
+  PASS;
+- targeted Prettier: PASS;
+- sensitive-value and machine-private-path scans: PASS;
+- one-way source scan: PASS;
+- `git diff --check`: PASS.
+
+The installed SAM CLI's ordinary `sam validate` path was not accepted as local evidence: that older
+CLI attempted to write outside the workspace and load managed-policy metadata from AWS IAM, then
+failed before validation because the sandbox denied the write/network path. No authenticated AWS
+operation or mutation succeeded. The injected offline translator subsequently validated the SAM
+transform without AWS access. Deployment-time CloudFormation change-set validation and AWS IAM
+simulation remain mandatory and are not implied by the local pass.
+
+Mocked repeated HTTP 200 DELETE responses establish handler behaviour for repeated successful
+control-plane outcomes. They do not establish Supabase behaviour when the target secret is already
+absent. Before production deployment, a non-production test flag must prove present-then-absent
+DELETE idempotency without adding secret-read permission. Provisioning must also prove whether the
+fine-grained token can be restricted to the production project/resource. If either property cannot
+be established, deployment must stop for security review.
+
+No AWS resource or credential was created or changed. No Supabase API, configuration, data, secret,
+or feature flag was contacted or mutated. No checkout or deployment occurred. The implementation
+was committed locally as `f177965bf6d1064a4899ba679242814f6ef66c5b`; no push occurred. Global
+reservations remain OFF according to the latest authoritative recorded production state. Model B
+remains open until non-production integration, credential-scope review, IAM simulation, deployment,
+production OFF-state proof and Meg's supervised FIDO drill pass. External alert delivery and tested
+second-human account recovery also remain open.
+
 ## 2026-08-19 — AWS FIDO and Unused-Credential Cleanup Verification
 
 **Record type:** READ-ONLY AWS IAM CREDENTIAL, MFA AND PERMISSION INVENTORY
