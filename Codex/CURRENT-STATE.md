@@ -19,13 +19,16 @@ have been corrected, focused production re-verification is complete, and the man
 reconciliation scheduler plus dual-layer heartbeat are production-active. The database-native
 lifecycle monitor and explicit rollback thresholds are also production-active and verified. The
 remaining global-enable readiness work is an authenticated external alert route with an independent
-critical fallback, the operator/incident runbook, human readiness review, and an explicit launch
-decision—not another repetition of already-closed payment or recovery scenarios.
+critical fallback, human readiness/access confirmation, and an explicit launch decision—not another
+repetition of already-closed payment or recovery scenarios. The authoritative operator/incident
+runbook has passed source-consistency, security, focused validation and tabletop review and is
+represented in local commit `158fb9bce39fe57fcf3799b546679e68241db323`.
 
 ## Git and Deployment State
 
-- Local `main` and `origin/main` are synchronized at
-  `5856838a058afd9f6c6ba3a04f51850c9970a3b9`.
+- `origin/main` remains at `ebc2dd138d4cfd56f3dd1b3d46ce16f2dff3fd74`. Local `main` contains
+  the unpublished operator-runbook provenance commit
+  `158fb9bce39fe57fcf3799b546679e68241db323`; project-memory provenance remains a separate commit.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -69,13 +72,15 @@ or repeated merely to improve labels without a documented safe runtime mechanism
 - Batch reconciler: VERIFIED READY FOR SCHEDULING and now SCHEDULED with production heartbeat
   evidence.
 - Reservation-v1 lifecycle monitor and objective rollback thresholds: PRODUCTION ACTIVE / CLOSED.
+- Authoritative reservation-v1 operator and incident-response runbook: REVIEWED / TABLETOP VERIFIED
+  / COMMITTED LOCALLY; documentation blocker CLOSED.
 - Reservation ownership, replacement lineage, paid finalization, unpaid release, browser recovery,
   confirmation capability and canary admission boundaries have the evidence grades recorded above.
 
 ## Latest Recorded Production Baseline
 
-The external-alerting preflight at `2026-08-19T15:16:05Z` confirmed the synthetic environment
-remains:
+The reconciliation-heartbeat diagnosis at `2026-08-19T16:08:48Z` confirmed the synthetic
+environment remains:
 
 | SKU               | Physical | Reserved | ATS |
 | ----------------- | -------: | -------: | --: |
@@ -93,10 +98,9 @@ The same checkpoint recorded:
 - held reservations: 0;
 - due reservations: 0;
 - open lifecycle incidents: 0;
-- open reconciliation jobs: 0;
-- empty synthetic basket.
+- open reconciliation jobs: 0.
 
-This is the latest recorded production baseline from the external-alerting preflight.
+This is the latest recorded production baseline from the reconciliation-heartbeat diagnosis.
 
 ## Production Configuration
 
@@ -117,7 +121,7 @@ This is the latest recorded production baseline from the external-alerting prefl
   attempts, and no worker failure. At `13:07:36Z`, the scheduler heartbeat was 37 seconds old and
   the latest completed worker heartbeat was 97 seconds old.
 - The provisional stale-worker threshold is five minutes: five missed one-minute completion
-  heartbeats. External notification routing remains part of the operator/incident-runbook task.
+  heartbeats. External notification routing remains a separate readiness blocker.
 - Scheduler rollback is `cron.alter_job(jobid, active := false)` for the exact named job. It leaves
   the reconciler, Stripe webhooks, Vault credential and existing reservation-v1 lifecycle active.
 - Lifecycle monitoring is scheduled independently every minute by the active production job
@@ -129,6 +133,15 @@ This is the latest recorded production baseline from the external-alerting prefl
 - A later read-only checkpoint at `2026-08-19T15:16:05Z` remained `HEALTHY`: monitor age was about
   5 seconds, worker age about 60 seconds, consecutive worker failures and due jobs were `0`, and all
   synthetic lifecycle/incident/job counts remained `0`.
+- The monitor recorded `worker_heartbeat_delayed` at `16:02:00Z` and `16:03:00Z`. Timeline evidence
+  proved every cron run succeeded and every pg_net request returned HTTP 200 `empty_queue` without
+  error or timeout. The monitor evaluated milliseconds before the scheduler transaction harvested
+  the already-completed prior response into the durable worker ledger. The first newly visible
+  completion was harvested about 21 milliseconds after the `16:02` snapshot, and scheduled health
+  returned automatically to `HEALTHY` at `16:04:00Z`, about 120 seconds after the warning began,
+  without operator intervention. At `16:08:48Z`, monitor age was about 48 seconds and worker age
+  about 60 seconds with no reason codes, failures or backlog. The monitor behaved according to its
+  documented durable-heartbeat threshold; thresholds were not changed.
 - Monitor, scheduler, and worker heartbeat warning thresholds are two minutes and rollback
   thresholds are five minutes. Critical inventory, paid/order, paid-release, duplicate-finalization,
   paid/manual-review, scheduler-authentication, and severe lifecycle-incident conditions require
@@ -149,32 +162,43 @@ alert destination, or independent critical fallback. Supabase's commented local/
 are not a configured production notification channel, and Klaviyo's catalogue/order integration is
 not an operator-alert transport.
 
-The target ownership is now approved but not implemented or production-verified:
+The target ownership is approved but not implemented or production-verified:
 
 - `WARNING` and recovery from warning: email `support@theanimalalchemist.com`, owned by Dexter;
-- `ROLLBACK_REQUIRED`: email `support@theanimalalchemist.com` and
-  `meg@theanimalalchemist.com`, owned by Dexter and escalation operator Meg;
-- critical fallback: Amazon SNS SMS, independently attempted from email delivery.
+- initial `ROLLBACK_REQUIRED`: email `support@theanimalalchemist.com` and Dexter via Amazon SNS SMS;
+- final failsafe: email `meg@theanimalalchemist.com` and Meg via Amazon SNS SMS when Dexter is
+  unavailable or has not acknowledged within two minutes. Meg is not the initial critical
+  recipient.
 
-No SMS destination may be stored in repository files, documentation, logs or project memory. No
-SNS destination/topic, SES capability, WorkMail sending capability, IAM principal, alert outbox,
-delivery worker, migration, credential, external test notification or production configuration has
-yet been verified or created. The next implementation step must first inspect the actual AWS
-capabilities and establish the approved secure secret/destination provisioning boundary. A generic
-unauthenticated webhook must not be invented merely to close this blocker.
+No SMS destination may be stored in repository files, documentation, logs or project memory. AWS
+discovery established SES production sending capability and the verified TAA domain in `eu-west-1`.
+SNS SMS production access remains pending; no alert topic/subscription, purpose-specific IAM
+principal, alert outbox, delivery worker, credential, external test notification or production
+configuration has yet been verified or created. A generic unauthenticated webhook must not be
+invented merely to close this blocker.
 
-### 2. Operator Runbook
+### 2. Human Readiness Review
 
-The authoritative paid-incident, refund/manual-fulfilment, reconciliation, rollback and escalation
-runbook remains open. It must identify operational ownership, access, alert response and rollback
-steps without recording credentials.
+The authoritative runbook is `docs/checkout-operator-runbook.md`. It covers health triage, all
+monitor reason codes, feature and scheduler rollback, paid incident handling, exact-attempt
+recovery, monitoring failure, incident recording, strict re-enablement and the launch watch. Its
+eight-scenario tabletop and final documentation review passed. Operational access confirmation,
+including the failsafe operator boundary, remains required.
 
 The lifecycle monitoring/rollback-threshold blocker is closed. Database monitoring deliberately
 does not claim an HTTP checkout error-rate because no accurate request denominator is persisted.
 Remaining readiness gates are authenticated external log/alert routing with an independent critical
-fallback, the authoritative operator/incident runbook, human readiness review, and separate
-explicit global-enable authorisation. Global reservation enablement remains blocked until those
-gates are completed and reviewed.
+fallback, human readiness/access review, and separate explicit global-enable authorisation. Global
+reservation enablement remains blocked until those gates are completed and reviewed.
+
+## Separate Security Follow-up
+
+Local-only runbook command validation surfaced a Supabase CLI advisory that `public.sync_logs` has
+RLS disabled. The baseline migration creates that table without enabling RLS; its grants do not
+include ordinary DML for `anon` or `authenticated`, but privilege grants are not a substitute for a
+deliberate RLS decision. Production applicability is unverified. No remediation was applied during
+the checkout runbook task; review the table's intended ownership and policies separately before any
+change.
 
 ## Current Architecture
 
@@ -218,9 +242,9 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 
 ## Exact Next Action
 
-From a clean synchronized Git preflight, inspect the actual AWS account/region capabilities for
-approved programmatic email and Amazon SNS without exposing credentials or any SMS destination.
-Then implement and independently production-verify the bounded durable alert outbox/delivery layer
-against the approved recipients and fallback. Complete the authoritative operator/incident runbook
-and human readiness review afterward, and require a separate global-enable decision. Global
+Perform one final read-only review of the two local operator-runbook provenance commits, then fetch
+and push only under separate authorization if the remote guard still passes. While SNS SMS
+production access remains pending, do not represent external delivery as operational. After access
+and secure destination provisioning are complete, implement and production-verify the bounded alert
+layer, complete human readiness/access review, and require a separate global-enable decision. Global
 reservations remain off.

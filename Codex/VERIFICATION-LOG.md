@@ -53,6 +53,125 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-19 — Checkout Operator Runbook Reviewed and Committed Locally
+
+**Record type:** SOURCE-CONTROL PROVENANCE; NO DEPLOYMENT OR PUSH
+**Evidence grade:** REVIEWED OPERATIONAL DOCUMENTATION COMMIT
+**Status:** RUNBOOK DOCUMENTATION BLOCKER CLOSED; HUMAN ACCESS READINESS REMAINS OPEN
+
+Final review found the runbook, lifecycle-monitoring contract and production-blocker update
+consistent with the deployed scheduler, reconciler and monitor architecture. The approved focused
+recheck passed with 34/34 reason-code coverage, valid local references, targeted Prettier, a
+sensitive-pattern scan and `git diff --check`. The three operational documents were unchanged from
+the preceding full SQL/tabletop checkpoint, so the eight scenarios and local SQL execution were not
+repeated merely for provenance.
+
+Commit `158fb9bce39fe57fcf3799b546679e68241db323` (`docs: add checkout operator incident runbook`)
+contains exactly:
+
+- `docs/checkout-operator-runbook.md`;
+- `docs/checkout-lifecycle-monitoring.md`;
+- `docs/checkout-production-blockers.md`.
+
+No application/runtime source, local tooling, credential, phone number, customer data or
+`public.sync_logs` change entered that commit. External alert routing remains open pending SNS SMS
+production access and runtime proof; operational access confirmation and a separate global-enable
+authorization also remain open. Global reservations remain OFF. No AWS or production action,
+deployment or push occurred.
+
+## 2026-08-19 — Checkout Operator Runbook Created and Tabletop Verified
+
+**Record type:** CURRENT WORKING-TREE OPERATIONAL DOCUMENTATION AND STRUCTURED TABLETOP EVIDENCE
+**Evidence grade:** SOURCE-CONSISTENT DOCUMENTATION; NO PRODUCTION MUTATION
+**Status:** OPERATOR/RUNBOOK BLOCKER CLOSED PENDING HUMAN REVIEW AND PROVENANCE COMMIT
+
+Created `docs/checkout-operator-runbook.md` as the authoritative reservation-v1 health, incident,
+rollback, paid-state, targeted-recovery, reconciliation, monitoring, re-enablement and launch-watch
+procedure. It labels every operator surface as read-only or mutating, identifies the required
+privilege, uses resource and credential names only, keeps Stripe authoritative for payment, and
+forbids ad hoc inventory/order repair and inferred unpaid release.
+
+The runbook was compared with the committed scheduler, monitor, reconciliation, attempt, intent,
+reservation, order and configuration contracts. Its SQL blocks executed successfully against local
+Supabase inside an explicit read-only transaction. All 31 evaluator reason codes plus the monitor
+reader's three independent heartbeat codes are represented. The installed CLI also confirmed
+support for the documented linked read-only query, name-only secret inventory and exact-name
+secret-unset interfaces. These checks establish current working-tree documentation validity; they
+are not new production-runtime evidence.
+
+Eight non-mutating tabletop cases passed: negative ATS; paid without an order; reconciler heartbeat
+stale beyond five minutes; monitor unavailable beyond five minutes; a paid manual-review operation;
+lost browser capability requiring exact-attempt recovery; global reservation rollback; and a
+request to re-enable after rollback. Every critical case disables new ordinary reservation-v1
+admission while preserving existing v1 attempts, Stripe webhooks, reconciliation, monitoring and
+targeted recovery. Paid uncertainty remains fail closed, and re-enablement requires an independent
+human decision after every gate is evidenced.
+
+The runbook records the known asynchronous worker-heartbeat harvest race and requires operators to
+inspect cron fire, pg_net response, durable worker completion, failure count and backlog before
+concluding that a warning is a worker failure. It does not weaken the two-minute warning or
+five-minute rollback thresholds.
+
+The current external alert ownership supersedes the earlier target contract but remains an approved
+target only: warning email and initial critical email go to `support@theanimalalchemist.com`; Dexter
+receives the initial critical SNS SMS; Meg is the final failsafe through
+`meg@theanimalalchemist.com` and SNS SMS if Dexter is unavailable or has not acknowledged within two
+minutes. SES production sending capability is known, but SNS SMS production access remains pending
+and no alert delivery implementation or receipt is claimed.
+
+No production query, checkout, reconciliation invocation, configuration mutation, deployment, AWS
+mutation, threshold change, commit or push occurred during the runbook work. The latest production
+state remains the preceding read-only heartbeat diagnosis: `HEALTHY`, clean synthetic lifecycle,
+and `CHECKOUT_RESERVATIONS_ENABLED` absent/OFF.
+
+During local-only command validation, the Supabase CLI independently warned that
+`public.sync_logs` has RLS disabled. Repository migration source confirms that the table is created
+without an `ENABLE ROW LEVEL SECURITY` statement; its recorded grants do not include ordinary DML
+for `anon` or `authenticated`, but that does not replace an RLS review. Production applicability was
+not queried in this documentation task. No remediation was applied; this is a separate security
+follow-up and not runbook verification evidence.
+
+## 2026-08-19 — Reconciliation Worker-Heartbeat Warning Automatically Recovered
+
+**Record type:** READ-ONLY PRODUCTION CRON, PG_NET, WORKER-LEDGER AND HEALTH EVIDENCE
+**Evidence grade:** PRODUCTION TIMELINE DIAGNOSIS
+**Status:** HEALTHY — TRANSIENT WARNING RESOLVED WITHOUT INTERVENTION
+
+At `2026-08-19T16:02:00.361497Z`, the health monitor recorded `WARNING` with the sole reason
+`worker_heartbeat_delayed`. The durable worker completion visible to that snapshot was
+`16:00:00.028128Z`, giving a worker age of `120.333369` seconds. The following `16:03:00.095266Z`
+snapshot also recorded the same warning at `120.057876` seconds. Neither snapshot crossed the
+existing five-minute rollback boundary.
+
+The scheduler/pg_net timeline proved this was a durable-ledger observation race rather than a
+worker failure. Both cron jobs fired and succeeded every minute from `15:58` through the inspected
+`16:08` cycles. Every reconciler scheduler row from `15:58` through `16:07` was `http_queued` and
+ultimately `succeeded`; every corresponding pg_net response was present, HTTP 200, not timed out,
+had no error, and classified `empty_queue` with `claimed = 0` and zero expired empty attempts. No
+`prior_request_in_flight`, lock suppression, queue failure, transport failure, HTTP failure,
+authentication failure or invalid response occurred.
+
+At `16:02`, the monitor evaluated at `16:02:00.361497Z`, while the scheduler transaction that
+harvested the already-completed `16:01` pg_net response updated its ledger row at
+`16:02:00.382208Z`, about 21 milliseconds later. The same ordering recurred at `16:03`: the monitor
+evaluated before that minute's scheduler harvest committed. Because pg_net completion is
+asynchronous and the scheduler harvests the prior response on the following minute, the independent
+monitor briefly saw the last durably harvested completion as just over two minutes old.
+
+The first new successful worker heartbeat therefore became durable about 21 milliseconds after the
+initial warning snapshot. The scheduled classification returned to `HEALTHY` at
+`16:04:00.019901Z`, `119.658404` seconds after the first warning, with no operator action. At the
+read-only `16:08:48.301765Z` checkpoint, health was `HEALTHY` with no reason codes; monitor age was
+about 48 seconds, worker age about 60 seconds, consecutive worker failures `0`, and all pending,
+retry-pending, claimed and manual-review reconciliation backlog counts were `0`.
+
+Inventory remained A `4/0/4`, BASE `1/0/1`, C `4/0/4`; active reservation-v1 attempts, intents and
+admissions, held/due reservations, open incidents and open jobs were all `0`. Both named cron jobs
+remained active every minute. `CHECKOUT_RESERVATIONS_ENABLED` remained absent by secret-name
+metadata, so global reservations remained OFF. No worker was invoked manually, no threshold was
+changed, and no production state or configuration was mutated. Monitoring behaved according to the
+documented durable-heartbeat threshold and cleared automatically when the ledger advanced.
+
 ## 2026-08-19 — External Checkout Alert Target Ownership Approved; Implementation Still Open
 
 **Record type:** OPERATOR-APPROVED TARGET ARCHITECTURE; NO IMPLEMENTATION OR DELIVERY EVIDENCE
