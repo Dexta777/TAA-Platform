@@ -2,7 +2,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(50);
+SELECT plan(53);
 
 SELECT has_column(
   'public',
@@ -460,6 +460,23 @@ SELECT ok(
   'initial activation atomically sets the active pointer and clears in-flight ownership'
 );
 
+SELECT ok(
+  (
+    SELECT worker_lease_id IS NULL AND worker_lease_expires_at IS NULL
+    FROM public.checkout_intents
+    WHERE id = (SELECT id FROM orchestration_test_ids WHERE name = 'initial')
+  ),
+  'initial activation releases its completed creation-worker lease'
+);
+
+SELECT ok(
+  public.claim_checkout_lifecycle_work(
+    (SELECT id FROM orchestration_test_ids WHERE name = 'initial'),
+    '94000000-0000-0000-0000-000000000001'
+  ),
+  'active replay acquires a fresh worker lease before capability rotation'
+);
+
 SELECT is(
   public.rotate_checkout_confirmation_capability(
     (SELECT id FROM orchestration_test_ids WHERE name = 'initial'),
@@ -469,6 +486,15 @@ SELECT is(
   ),
   2,
   'active replay rotates the hash and increments confirmation generation'
+);
+
+SELECT ok(
+  (
+    SELECT worker_lease_id IS NULL AND worker_lease_expires_at IS NULL
+    FROM public.checkout_intents
+    WHERE id = (SELECT id FROM orchestration_test_ids WHERE name = 'initial')
+  ),
+  'confirmation capability rotation releases its completed recovery-worker lease'
 );
 
 SELECT is(

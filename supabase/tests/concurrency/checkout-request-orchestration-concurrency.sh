@@ -20,25 +20,29 @@ SET
   in_flight_checkout_intent_id = NULL
 WHERE id IN (
   'a1000000-0000-4000-8000-000000000001',
-  'a1000000-0000-4000-8000-000000000002'
+  'a1000000-0000-4000-8000-000000000002',
+  'a1000000-0000-4000-8000-000000000003'
 );
 
 DELETE FROM public.inventory_reservations
 WHERE checkout_attempt_id IN (
   'a1000000-0000-4000-8000-000000000001',
-  'a1000000-0000-4000-8000-000000000002'
+  'a1000000-0000-4000-8000-000000000002',
+  'a1000000-0000-4000-8000-000000000003'
 );
 
 DELETE FROM public.checkout_intents
 WHERE checkout_attempt_id IN (
   'a1000000-0000-4000-8000-000000000001',
-  'a1000000-0000-4000-8000-000000000002'
+  'a1000000-0000-4000-8000-000000000002',
+  'a1000000-0000-4000-8000-000000000003'
 );
 
 DELETE FROM public.checkout_attempts
 WHERE id IN (
   'a1000000-0000-4000-8000-000000000001',
-  'a1000000-0000-4000-8000-000000000002'
+  'a1000000-0000-4000-8000-000000000002',
+  'a1000000-0000-4000-8000-000000000003'
 );
 
 DELETE FROM public.shipping_rates
@@ -74,7 +78,7 @@ VALUES (
   'orchestration-concurrency-product',
   'ORCHESTRATION-CONCURRENCY',
   10.00,
-  2,
+  3,
   true,
   100
 );
@@ -402,3 +406,138 @@ if [[ "${branch_state}" != '1|1' ]]; then
 fi
 
 echo 'PASS: racing replacement B and C from active A established only one durable in-flight branch.'
+
+"${psql_command[@]}" >/dev/null <<'SQL'
+SELECT admission_state
+FROM public.admit_checkout_request_v1(
+  'a1000000-0000-4000-8000-000000000003',
+  'a4000000-0000-4000-8000-000000000020',
+  NULL,
+  repeat('c', 64),
+  NULL
+);
+SQL
+
+"${psql_command[@]}" >/dev/null <<SQL
+$(prepare_request_sql \
+  'a1000000-0000-4000-8000-000000000003' \
+  'a4000000-0000-4000-8000-000000000020' \
+  'c' \
+  '6' \
+  '' \
+  'a5000000-0000-4000-8000-000000000020')
+SQL
+
+lease_intent_id="$("${psql_command[@]}" -Atc "SELECT in_flight_checkout_intent_id FROM public.checkout_attempts WHERE id = 'a1000000-0000-4000-8000-000000000003';")"
+
+"${psql_command[@]}" >/dev/null <<SQL
+SELECT *
+FROM public.begin_checkout_session_creation(
+  '${lease_intent_id}',
+  'a5000000-0000-4000-8000-000000000020',
+  repeat('7', 64)
+);
+
+SELECT public.record_checkout_session(
+  '${lease_intent_id}',
+  'a5000000-0000-4000-8000-000000000020',
+  'cs_test_orchestration_lease_release',
+  (SELECT stripe_session_expires_at FROM public.checkout_intents WHERE id = '${lease_intent_id}'),
+  '[{"position":0,"stripe_shipping_rate_id":"shr_lease_release"}]'::jsonb
+);
+
+SELECT public.activate_checkout_request(
+  '${lease_intent_id}',
+  'a5000000-0000-4000-8000-000000000020',
+  repeat('8', 64),
+  clock_timestamp() + interval '24 hours'
+);
+SQL
+
+activation_state="$("${psql_command[@]}" -Atc "SELECT concat_ws('|', orchestration_state, status, worker_lease_id IS NULL, worker_lease_expires_at IS NULL) FROM public.checkout_intents WHERE id = '${lease_intent_id}';")"
+
+if [[ "${activation_state}" != 'active|pending|t|t' ]]; then
+  echo "Completed activation retained unsafe worker state: ${activation_state}" >&2
+  exit 1
+fi
+
+echo 'PASS: completed activation published one active Session and released its creation-worker lease.'
+
+"${psql_command[@]}" >"${first_output}" 2>&1 <<SQL &
+BEGIN;
+SET application_name = 'taa_orchestration_resume_a';
+SELECT resume_state, checkout_intent_id, checkout_session_id, worker_lease_acquired
+FROM public.resume_checkout_request_v1(
+  'a1000000-0000-4000-8000-000000000003',
+  'a4000000-0000-4000-8000-000000000020',
+  NULL,
+  repeat('c', 64),
+  'a5000000-0000-4000-8000-000000000021'
+);
+SELECT pg_sleep(3);
+COMMIT;
+SQL
+first_pid=$!
+
+wait_for_database_condition \
+  "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'taa_orchestration_resume_a' AND state = 'active' AND query LIKE 'SELECT pg_sleep%';" \
+  'Recovery worker A did not reach its post-resume uncommitted hold.'
+
+"${psql_command[@]}" >"${second_output}" 2>&1 <<'SQL' &
+SET application_name = 'taa_orchestration_resume_b';
+SELECT resume_state, checkout_intent_id, checkout_session_id, worker_lease_acquired
+FROM public.resume_checkout_request_v1(
+  'a1000000-0000-4000-8000-000000000003',
+  'a4000000-0000-4000-8000-000000000020',
+  NULL,
+  repeat('c', 64),
+  'a5000000-0000-4000-8000-000000000022'
+);
+SQL
+second_pid=$!
+
+wait_for_database_condition \
+  "SELECT count(*) FROM pg_stat_activity AS blocked JOIN pg_stat_activity AS blocker ON blocker.pid = ANY(pg_blocking_pids(blocked.pid)) WHERE blocked.application_name = 'taa_orchestration_resume_b' AND blocker.application_name = 'taa_orchestration_resume_a' AND blocked.wait_event_type = 'Lock';" \
+  'Recovery worker B was not observed waiting for uncommitted recovery worker A.'
+
+echo 'PASS: recovery worker B waited for worker A before observing lease ownership.'
+
+wait "${first_pid}"
+wait "${second_pid}"
+
+if ! grep -q 'resumable' "${first_output}"; then
+  echo 'Recovery worker A did not acquire the completed activation.' >&2
+  sed 's/^/  /' "${first_output}" >&2
+  exit 1
+fi
+
+if ! grep -q 'operation_in_progress' "${second_output}"; then
+  echo 'Recovery worker B did not remain fenced behind worker A.' >&2
+  sed 's/^/  /' "${second_output}" >&2
+  exit 1
+fi
+
+lease_race_state="$("${psql_command[@]}" -Atc "SELECT concat_ws('|', count(*), count(DISTINCT stripe_checkout_session_id), (SELECT count(*) FROM public.inventory_reservations WHERE checkout_attempt_id = 'a1000000-0000-4000-8000-000000000003'), bool_and(worker_lease_id = 'a5000000-0000-4000-8000-000000000021')) FROM public.checkout_intents WHERE checkout_attempt_id = 'a1000000-0000-4000-8000-000000000003';")"
+
+if [[ "${lease_race_state}" != '1|1|1|t' ]]; then
+  echo "Concurrent resume produced unexpected lifecycle ownership: ${lease_race_state}" >&2
+  exit 1
+fi
+
+"${psql_command[@]}" >/dev/null <<SQL
+SELECT public.rotate_checkout_confirmation_capability(
+  '${lease_intent_id}',
+  'a5000000-0000-4000-8000-000000000021',
+  repeat('9', 64),
+  clock_timestamp() + interval '24 hours'
+);
+SQL
+
+completed_state="$("${psql_command[@]}" -Atc "SELECT concat_ws('|', worker_lease_id IS NULL, worker_lease_expires_at IS NULL, confirmation_generation) FROM public.checkout_intents WHERE id = '${lease_intent_id}';")"
+
+if [[ "${completed_state}" != 't|t|2' ]]; then
+  echo "Completed recovery retained unsafe worker state: ${completed_state}" >&2
+  exit 1
+fi
+
+echo 'PASS: racing recovery workers retained one Session and reservation; completed rotation released the winning lease.'
