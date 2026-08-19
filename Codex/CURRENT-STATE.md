@@ -19,16 +19,16 @@ have been corrected, focused production re-verification is complete, and the man
 reconciliation scheduler plus dual-layer heartbeat are production-active. The database-native
 lifecycle monitor and explicit rollback thresholds are also production-active and verified. The
 remaining global-enable readiness work is an authenticated external alert route with an independent
-critical fallback, human readiness/access confirmation, and an explicit launch decision—not another
+critical fallback, four bounded human-readiness actions, and an explicit launch decision—not another
 repetition of already-closed payment or recovery scenarios. The authoritative operator/incident
-runbook has passed source-consistency, security, focused validation and tabletop review and is
-represented in local commit `158fb9bce39fe57fcf3799b546679e68241db323`.
+runbook is committed and has passed source-consistency, security, focused validation and tabletop
+review. A human-access review now records where primary and failsafe operation is and is not proven.
 
 ## Git and Deployment State
 
-- `origin/main` remains at `ebc2dd138d4cfd56f3dd1b3d46ce16f2dff3fd74`. Local `main` contains
-  the unpublished operator-runbook provenance commit
-  `158fb9bce39fe57fcf3799b546679e68241db323`; project-memory provenance remains a separate commit.
+- `origin/main` remains at `21e1b5b6f0de7ec082567a9da9491c67cbbce34b`. Local `main` contains the
+  unpublished human-failover requirements commit `15929c3cc5f11f6a25e64b71eb185d946efd8fed`;
+  this project-memory record is its separate follow-on evidence boundary.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -182,14 +182,35 @@ invented merely to close this blocker.
 The authoritative runbook is `docs/checkout-operator-runbook.md`. It covers health triage, all
 monitor reason codes, feature and scheduler rollback, paid incident handling, exact-attempt
 recovery, monitoring failure, incident recording, strict re-enablement and the launch watch. Its
-eight-scenario tabletop and final documentation review passed. Operational access confirmation,
-including the failsafe operator boundary, remains required.
+eight-scenario lifecycle tabletop and final documentation review passed.
+
+The subsequent read-only human-access review classified readiness as **READY AFTER FOUR ACTIONS**.
+Dexter currently has usable GitHub administration, linked Supabase project/database and secret
+metadata access, production-proven Edge-secret mutation history, and AWS SES/SNS management access.
+The runbook is committed in a publicly readable Git repository and does not depend on Codex or chat
+history. However:
+
+1. Meg has no verified one-way rollback control; Model B is required because escalation-only Model A
+   cannot meet the five-minute SLA when Dexter is unreachable;
+2. current AWS human access does not meet the required MFA/least-privilege/temporary-credential and
+   recoverable break-glass standard;
+3. no authoritative two-human password-manager/account-recovery route independent of Dexter's Mac
+   or primary MFA device is evidenced;
+4. Dexter's named Stripe live/test access, MFA, account recovery, refund/manual-fulfilment authority
+   and non-mutating paid-incident lookup procedure remain unverified.
+
+Model B must expose only an authenticated, audited, idempotent removal of
+`CHECKOUT_RESERVATIONS_ENABLED`; it must never give Meg general Supabase, database, AWS, Stripe,
+scheduler, deployment, or secret-read access. The six human-failover tabletops passed only when
+Dexter and his current Mac were available or when the runbook alone was the dependency. Meg
+unreachable-primary, alternate-device and credential-recovery scenarios remain blocked until the
+four actions are implemented and tested.
 
 The lifecycle monitoring/rollback-threshold blocker is closed. Database monitoring deliberately
 does not claim an HTTP checkout error-rate because no accurate request denominator is persisted.
 Remaining readiness gates are authenticated external log/alert routing with an independent critical
-fallback, human readiness/access review, and separate explicit global-enable authorisation. Global
-reservation enablement remains blocked until those gates are completed and reviewed.
+fallback, the four human-readiness actions above, and separate explicit global-enable authorisation.
+Global reservation enablement remains blocked until those gates are completed and reviewed.
 
 ## Separate Security Follow-up
 
@@ -242,9 +263,11 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 
 ## Exact Next Action
 
-Perform one final read-only review of the two local operator-runbook provenance commits, then fetch
-and push only under separate authorization if the remote guard still passes. While SNS SMS
-production access remains pending, do not represent external delivery as operational. After access
-and secure destination provisioning are complete, implement and production-verify the bounded alert
-layer, complete human readiness/access review, and require a separate global-enable decision. Global
-reservations remain off.
+Perform a final read-only review of the two local human-readiness provenance commits, then fetch and
+push only under separate authorization if the remote guard passes. After provenance is synchronized,
+close the four human-readiness actions: build and drill Meg's one-way Model B rollback control;
+harden/recover AWS human access; establish tested two-human account recovery independent of Dexter's
+Mac; and verify Dexter's named Stripe live/test incident access plus refund/manual-fulfilment
+authority. In parallel, wait for SNS SMS production access before implementing and
+production-verifying external alert delivery. Require a separate global-enable decision after every
+gate closes. Global reservations remain off.

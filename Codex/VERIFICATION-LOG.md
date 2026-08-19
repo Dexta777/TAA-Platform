@@ -53,6 +53,73 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-19 — Checkout Human Operational-Readiness and Access Review
+
+**Record type:** READ-ONLY HUMAN ACCESS, RECOVERY AND DOCUMENTATION TABLETOP
+**Evidence grade:** CURRENT CLI ACCESS CLASSIFICATION PLUS DOCUMENTED HISTORICAL MUTATION EVIDENCE
+**Status:** READY AFTER FOUR ACTIONS; GLOBAL ENABLEMENT REMAINS BLOCKED
+
+The review began from clean synchronized `main` and `origin/main` at
+`21e1b5b6f0de7ec082567a9da9491c67cbbce34b`, with nothing staged. It inspected the committed
+operator runbook, lifecycle monitoring contract, production blockers, ADR-0001, current project
+memory and relevant production-history evidence. No checkout, deployment, access grant, credential
+creation, IAM/configuration change, threshold change or production mutation occurred.
+
+Non-sensitive current capability checks established:
+
+- Dexter's GitHub session is authenticated with repository `ADMIN`; the repository and committed
+  runbook are publicly readable without Codex or chat history;
+- the linked production Supabase project is visible, Edge-secret metadata can be read, and a
+  credential-free linked database query succeeds; recorded production secret rotation/unset work
+  separately proves the required Edge-secret mutation class;
+- the reconciliation credential exists durably as the Edge secret
+  `CHECKOUT_RECONCILIATION_SECRET` and scheduler Vault copy
+  `taa_checkout_reconciliation_secret`, so the process copy is not the sole recoverable instance;
+- the current AWS operator session is an IAM user with SES production sending and verified TAA-domain
+  capability, SNS management permissions and root-account MFA present; SNS SMS remains sandboxed;
+- the current AWS human-access model does not meet the required MFA/least-privilege standard and
+  relies on long-lived credentials. Exact identifiers and credential values were not read or
+  recorded;
+- current named Stripe dashboard/live/test access, MFA and recovery were not evidenced;
+- no authoritative password-manager/two-human account-recovery process or alternate-device
+  Supabase/Stripe recovery was evidenced;
+- Meg's runbook acknowledgement, alert receipt and infrastructure/rollback access remain
+  unverified. Broad infrastructure access is neither required nor recommended.
+
+The selected failsafe boundary is Model B: Meg should receive the final failsafe and use a separate
+named MFA-protected control that can only idempotently remove `CHECKOUT_RESERVATIONS_ENABLED` from
+the fixed production project. Its underlying management credential must remain hidden; the control
+must not enable the flag, accept arbitrary names, reveal secrets, run SQL, deploy, or disable
+reconciliation/monitoring. Model A cannot meet the five-minute rollback SLA when Dexter is
+unreachable, while Model C grants unnecessary privilege.
+
+Six documentation/access tabletops produced:
+
+1. Dexter available: PASS; his current operator surfaces can execute the documented rollback.
+2. Dexter alert path fails and Meg receives failsafe: FAIL currently; delivery and Meg's rollback
+   control are not operational.
+3. Dexter unreachable for 15 minutes: FAIL currently; Meg cannot perform the required five-minute
+   rollback.
+4. Codex unavailable: PASS for document availability; the committed runbook is independently
+   readable.
+5. Dexter's Mac unavailable: FAIL currently; alternate-device Supabase/Stripe/account recovery is
+   not verified.
+6. Primary password-manager/MFA device unavailable: FAIL currently; no tested second-human recovery
+   path is evidenced.
+
+Four human-readiness actions must close before global enablement: implement and drill Meg's Model B
+control; harden AWS human access and emergency recovery; establish a tested two-human authoritative
+account-recovery process independent of Dexter's Mac; and verify Dexter's named Stripe live/test
+access, MFA/recovery, refund/manual-fulfilment authority and a non-mutating paid-incident lookup.
+External alert routing remains a separate open blocker pending SNS SMS production access and runtime
+delivery proof. Global reservations remain OFF according to the current name-only metadata check.
+No credential value, phone number, customer data or private identifier was recorded.
+
+The reviewed operational documentation is represented in local, unpushed commit
+`15929c3cc5f11f6a25e64b71eb185d946efd8fed`, containing only
+`docs/checkout-operator-runbook.md` and `docs/checkout-production-blockers.md`. This project-memory
+record is the separate follow-on evidence boundary. No push or production action was performed.
+
 ## 2026-08-19 — Checkout Operator Runbook Reviewed and Committed Locally
 
 **Record type:** SOURCE-CONTROL PROVENANCE; NO DEPLOYMENT OR PUSH
