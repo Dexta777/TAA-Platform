@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Local infrastructure definition for TAA Model B one-way checkout rollback.
+
+Parameters:
+  SupabaseProductionProjectRef:
+    Type: String
+    Description: Fixed production Supabase project ref captured in the published Lambda version.
+    AllowedValues:
+      - zxmywtmjvfjgdjcstgtn
+    NoEcho: true
+  ModelBCredentialSecretArn:
+    Type: String
+    Description: ARN of the pre-provisioned dedicated Model B credential secret.
+    AllowedPattern: >-
+      ^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:taa/model-b/supabase-management-token-[A-Za-z0-9]{6}$
+    NoEcho: true
+  LambdaCodeSha256:
+    Type: String
+    Description: Base64 SHA-256 of the reviewed deployment package used to publish the version.
+    AllowedPattern: '^[A-Za-z0-9+/]{43}=$'
+
+Resources:
+  ModelBLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/taa-emergency-disable-checkout-reservations
+      RetentionInDays: 365
+
+  ModelBLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: taa-model-b-lambda-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadOnlyDedicatedModelBCredential
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref ModelBCredentialSecretArn
+        - PolicyName: WriteOnlyModelBReceiptLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/taa-emergency-disable-checkout-reservations:*
+
+  ModelBFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ModelBLogGroup
+    Properties:
+      FunctionName: taa-emergency-disable-checkout-reservations
+      Description: One-way removal of CHECKOUT_RESERVATIONS_ENABLED for the fixed TAA project.
+      CodeUri: src/
+      Handler: disable-checkout-reservations.handler
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      MemorySize: 128
+      Timeout: 15
+      ReservedConcurrentExecutions: 1
+      Role: !GetAtt ModelBLambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TAA_MODEL_B_SUPABASE_PROJECT_REF: !Ref SupabaseProductionProjectRef
+          TAA_MODEL_B_CREDENTIAL_SECRET_ARN: !Ref ModelBCredentialSecretArn
+          TAA_MODEL_B_TIMEOUT_MS: '8000'
+
+  ModelBFunctionVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref ModelBFunction
+      CodeSha256: !Ref LambdaCodeSha256
+      Description: Immutable reviewed Model B rollback function version.
+
+  ModelBAutomationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: taa-model-b-ssm-automation-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*
+      Policies:
+        - PolicyName: InvokeOnlyImmutableModelBFunctionVersion
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Ref ModelBFunctionVersion
+
+  EmergencyDisableDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: TAA-EmergencyDisableCheckoutReservations
+      DocumentType: Automation
+      DocumentFormat: YAML
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '0.3'
+        description: Disable new TAA reservation-v1 admission through one fixed operation.
+        assumeRole: !GetAtt ModelBAutomationExecutionRole.Arn
+        mainSteps:
+          - name: DisableCheckoutReservations
+            action: aws:invokeLambdaFunction
+            maxAttempts: 1
+            timeoutSeconds: 20
+            onFailure: Abort
+            inputs:
+              FunctionName: !Ref ModelBFunctionVersion
+              InvocationType: RequestResponse
+              LogType: None
+        outputs:
+          - DisableCheckoutReservations.Payload
+
+  MegModelBPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: taa-meg-model-b-boundary
+      Description: Caps Meg to the MFA-gated, pinned Model B Automation surface.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowPinnedAutomationExecutionWithMfa
+            Effect: Allow
+            Action: ssm:StartAutomationExecution
+            Resource:
+              - !Sub >-
+                arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${EmergencyDisableDocument}
+              - !Sub >-
+                arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${EmergencyDisableDocument}:1
+              - !Sub >-
+                arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              StringEquals:
+                aws:RequestTag/TAA-Control: CheckoutModelB
+              ForAnyValue:StringEquals:
+                ssm:DocumentVersion:
+                  - '1'
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - TAA-Control
+          - Sid: AllowPinnedDocumentReadWithMfa
+            Effect: Allow
+            Action:
+              - ssm:GetDocument
+              - ssm:DescribeDocument
+            Resource: !Sub >-
+              arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${EmergencyDisableDocument}
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+          - Sid: AllowAutomationReceiptReadWithMfa
+            Effect: Allow
+            Action:
+              - ssm:GetAutomationExecution
+              - ssm:DescribeAutomationStepExecutions
+            Resource: !Sub >-
+              arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              StringEquals:
+                aws:ResourceTag/TAA-Control: CheckoutModelB
+          - Sid: AllowPassOnlyModelBAutomationRoleWithMfa
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt ModelBAutomationExecutionRole.Arn
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              StringEquals:
+                iam:PassedToService: ssm.amazonaws.com
+          - Sid: DenyModelBWithoutMfa
+            Effect: Deny
+            Action:
+              - ssm:StartAutomationExecution
+              - ssm:GetDocument
+              - ssm:DescribeDocument
+              - ssm:GetAutomationExecution
+              - ssm:DescribeAutomationStepExecutions
+              - iam:PassRole
+            Resource: '*'
+            Condition:
+              BoolIfExists:
+                aws:MultiFactorAuthPresent: 'false'
+          - Sid: DenyProgrammaticCredentials
+            Effect: Deny
+            Action:
+              - iam:CreateAccessKey
+              - iam:UpdateAccessKey
+              - iam:DeleteAccessKey
+              - iam:CreateServiceSpecificCredential
+              - iam:ResetServiceSpecificCredential
+              - iam:UpdateServiceSpecificCredential
+              - iam:DeleteServiceSpecificCredential
+            Resource: '*'
+
+  MegModelBExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: taa-meg-model-b-execution
+      Description: Allows only the pinned, MFA-gated Model B Automation and its safe receipt.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowPinnedAutomationExecutionWithMfa
+            Effect: Allow
+            Action: ssm:StartAutomationExecution
+            Resource:
+              - !Sub >-
+                arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${EmergencyDisableDocument}
+              - !Sub >-
+                arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${EmergencyDisableDocument}:1
+              - !Sub >-
+                arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              StringEquals:
+                aws:RequestTag/TAA-Control: CheckoutModelB
+              ForAnyValue:StringEquals:
+                ssm:DocumentVersion:
+                  - '1'
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - TAA-Control
+          - Sid: AllowPinnedDocumentReadWithMfa
+            Effect: Allow
+            Action:
+              - ssm:GetDocument
+              - ssm:DescribeDocument
+            Resource: !Sub >-
+              arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${EmergencyDisableDocument}
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+          - Sid: AllowAutomationReceiptReadWithMfa
+            Effect: Allow
+            Action:
+              - ssm:GetAutomationExecution
+              - ssm:DescribeAutomationStepExecutions
+            Resource: !Sub >-
+              arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              StringEquals:
+                aws:ResourceTag/TAA-Control: CheckoutModelB
+          - Sid: AllowPassOnlyModelBAutomationRoleWithMfa
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt ModelBAutomationExecutionRole.Arn
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: 'true'
+              StringEquals:
+                iam:PassedToService: ssm.amazonaws.com
+          - Sid: DenyModelBWithoutMfa
+            Effect: Deny
+            Action:
+              - ssm:StartAutomationExecution
+              - ssm:GetDocument
+              - ssm:DescribeDocument
+              - ssm:GetAutomationExecution
+              - ssm:DescribeAutomationStepExecutions
+              - iam:PassRole
+            Resource: '*'
+            Condition:
+              BoolIfExists:
+                aws:MultiFactorAuthPresent: 'false'
+          - Sid: DenyProgrammaticCredentials
+            Effect: Deny
+            Action:
+              - iam:CreateAccessKey
+              - iam:UpdateAccessKey
+              - iam:DeleteAccessKey
+              - iam:CreateServiceSpecificCredential
+              - iam:ResetServiceSpecificCredential
+              - iam:UpdateServiceSpecificCredential
+              - iam:DeleteServiceSpecificCredential
+            Resource: '*'
+
+  MegModelBUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: taa-meg-checkout-rollback
+      PermissionsBoundary: !Ref MegModelBPermissionsBoundary
+      ManagedPolicyArns:
+        - !Ref MegModelBExecutionPolicy
+      Tags:
+        - Key: taa:purpose
+          Value: checkout-model-b-emergency-disable

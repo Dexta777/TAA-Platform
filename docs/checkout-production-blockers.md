@@ -123,21 +123,31 @@ monitoring/rollback-threshold blocker is closed. The authoritative operator/inci
 closing the documentation blocker. The subsequent human-readiness/access review found Dexter's
 current GitHub, linked Supabase/database, Edge-secret, and AWS operator surfaces usable, but did not
 find a verified Meg rollback path, alternate-device Supabase/Stripe recovery, or an authoritative
-two-human credential-recovery process. The current AWS human IAM access also does not meet the
-required MFA/least-privilege standard. Human readiness is therefore **READY AFTER FOUR ACTIONS**:
+two-human credential-recovery process. A later AWS audit verified Brad's console hardware-FIDO,
+root MFA/no root keys, inactive unused service credentials, and a disabled-at-rest human CLI key.
+Broad AdministratorAccess, temporary/federated access, and legacy IAM rationalisation remain
+post-launch hardening unless a broad human credential enters the checkout path. Human readiness is
+therefore **READY AFTER THREE ACTION STREAMS**:
 
-1. implement and drill a one-way, idempotent Model B rollback control for Meg that can only remove
-   `CHECKOUT_RESERVATIONS_ENABLED`;
-2. harden AWS human access with MFA, least privilege/temporary credentials, and documented
-   root/emergency recovery;
-3. establish and test a two-human password-manager/account-recovery path independent of Dexter's
+1. review, non-production-verify, deploy, and drill the local one-way Model B rollback control for
+   Meg that can only remove `CHECKOUT_RESERVATIONS_ENABLED`;
+2. establish and test a two-human password-manager/account-recovery path independent of Dexter's
    Mac and primary MFA device;
-4. verify Dexter's named Stripe live/test access, MFA/recovery, refund/manual-fulfilment authority,
+3. verify Dexter's named Stripe live/test access, MFA/recovery, refund/manual-fulfilment authority,
    and non-mutating paid-incident lookup procedure.
 
 The full access matrix and six-scenario failover tabletop are in
-`docs/checkout-operator-runbook.md`. External alert routing, these four human-readiness actions and a
-separate launch decision remain open. Global reservations remain off.
+`docs/checkout-operator-runbook.md`. Model B is **IMPLEMENTED LOCALLY / NOT DEPLOYED / NOT
+PRODUCTION-PROVEN** in `infra/checkout-model-b` and `docs/checkout-model-b-rollback.md`. It fixes the
+project, secret name, DELETE method, Management API origin, SSM document version, and immutable
+Lambda version server-side; rejects caller input; requests `edge_functions_secrets_write` only;
+requires fixed execution tag `TAA-Control=CheckoutModelB`; restricts Meg's receipt reads to matching
+Model B executions; and gives her no execution-list, retagging, secret-read, or direct Lambda access.
+The SSM document remains zero-parameter. Model B remains open pending project-scope verification for
+the dedicated Supabase token, non-production present/absent DELETE idempotency, deployment-time IAM
+simulation, deployment, production OFF-state proof, and Meg's supervised FIDO drill. External alert
+routing, these three human-readiness streams, and a separate launch decision remain open. Global
+reservations remain off.
 
 The historical `legacy/webflow/order-confirmation.js` reference is not a deployable function or an
 approved production path. `get-order-confirmation` must never be restored as part of rollback. Only

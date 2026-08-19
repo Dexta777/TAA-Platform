@@ -13,6 +13,7 @@ the pending routing contract is documented below.
 Related authority:
 
 - [Checkout lifecycle monitoring and rollback contract](./checkout-lifecycle-monitoring.md)
+- [Model B emergency checkout rollback](./checkout-model-b-rollback.md)
 - [Checkout production blockers](./checkout-production-blockers.md)
 - [ADR-0001 — Reservation-owned checkout finalization](../Codex/01-Architecture/Repository-Architecture/ADR/ADR-0001-reservation-owned-checkout-finalization.md)
 - [Verification evidence](../Codex/VERIFICATION-LOG.md)
@@ -53,8 +54,9 @@ rollback.
    admission, or re-enable reservations without the separate procedure and authority below.
 
 If the operator cannot complete step 2 within five minutes, escalate through the approved human
-failsafe. External alert delivery and the failsafe mutation path are not yet production-operational,
-so controlled global enablement remains blocked.
+failsafe. Model B now has a local, undeployed implementation, but external alert delivery and the
+failsafe mutation path are not production-operational, so controlled global enablement remains
+blocked.
 
 ## Ownership
 
@@ -80,18 +82,18 @@ Access evidence uses three classifications:
 
 ### Current capability matrix
 
-| Capability                                                                        | System / privilege                                            | Dexter                                                                                                    | Meg                           | Meg needs it?                                                                                 | Recovery position                                                                                                       |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Read health, heartbeats, incidents, jobs, overdue reservations, ATS, and topology | Supabase linked database operator with `private`/`cron` reads | VERIFIED ACCESS                                                                                           | MISSING                       | No for routine work; the emergency control should return a safe receipt, not private topology | Current access is tied to Dexter's working operator session; alternate-device recovery is not verified.                 |
-| Read global/canary flag names and manage Edge configuration                       | Supabase project secret metadata/write boundary               | VERIFIED ACCESS; current reads and recorded secret rotation/unset operations                              | MISSING                       | Only one-way global disable                                                                   | A second human cannot currently perform the rollback.                                                                   |
-| Disable `taa-checkout-reconciliation-v1` exceptionally                            | Supabase postgres/cron operator                               | VERIFIED ACCESS for the underlying operator session; mutation deliberately not repeated                   | MISSING                       | No                                                                                            | Dexter or a separately authorized database operator; do not include this in Meg's minimal role.                         |
-| Invoke exact targeted recovery                                                    | Reconciler endpoint plus `CHECKOUT_RECONCILIATION_SECRET`     | VERIFIED ACCESS; production-proven                                                                        | MISSING                       | No                                                                                            | Rotate the credential through Supabase Edge secret plus Vault if the current value is lost; never recover it from logs. |
-| Retrieve authoritative payment state and decide refund/manual fulfilment          | Stripe live/test operator tooling                             | MISSING current human-access evidence                                                                     | MISSING                       | No; escalate                                                                                  | Verify Dexter's named Stripe access, MFA, recovery route, and a non-mutating lookup drill before enablement.            |
-| Execute an approved refund or manual fulfilment after the incident decision       | Stripe plus fulfilment/dispatch operations                    | MISSING current named-access/authority evidence                                                           | MISSING                       | No; escalate                                                                                  | Name and verify the executor and audit route; never make both actions independently.                                    |
-| Manage SES/SNS resources for the future alert route                               | AWS operator                                                  | VERIFIED ACCESS, but the current human IAM-user model does not meet the required MFA/least-privilege gate | MISSING                       | No                                                                                            | Establish named MFA-protected, recoverable, least-privilege access; SNS SMS remains sandboxed/pending.                  |
-| Read and administer repository                                                    | GitHub                                                        | VERIFIED ACCESS (`ADMIN`); repository/runbook is publicly readable                                        | MISSING as a named-user check | Read only                                                                                     | The committed runbook does not depend on Codex, chat history, or a private browser profile.                             |
-| Publish Webflow                                                                   | Webflow site publisher                                        | DOCUMENTED BUT NOT VERIFIED currently; prior production publish exists                                    | MISSING                       | No                                                                                            | Can defer until a release requires Webflow; not needed for emergency rollback.                                          |
-| Recover accounts and operational secrets from another device                      | Authoritative password manager/account recovery               | MISSING                                                                                                   | MISSING                       | Meg needs only her named failsafe credential, not Dexter's secrets                            | No documented, tested two-human recovery path exists.                                                                   |
+| Capability                                                                        | System / privilege                                            | Dexter                                                                                                                | Meg                           | Meg needs it?                                                                                 | Recovery position                                                                                                       |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Read health, heartbeats, incidents, jobs, overdue reservations, ATS, and topology | Supabase linked database operator with `private`/`cron` reads | VERIFIED ACCESS                                                                                                       | MISSING                       | No for routine work; the emergency control should return a safe receipt, not private topology | Current access is tied to Dexter's working operator session; alternate-device recovery is not verified.                 |
+| Read global/canary flag names and manage Edge configuration                       | Supabase project secret metadata/write boundary               | VERIFIED ACCESS; current reads and recorded secret rotation/unset operations                                          | MISSING                       | Only one-way global disable                                                                   | A second human cannot currently perform the rollback.                                                                   |
+| Disable `taa-checkout-reconciliation-v1` exceptionally                            | Supabase postgres/cron operator                               | VERIFIED ACCESS for the underlying operator session; mutation deliberately not repeated                               | MISSING                       | No                                                                                            | Dexter or a separately authorized database operator; do not include this in Meg's minimal role.                         |
+| Invoke exact targeted recovery                                                    | Reconciler endpoint plus `CHECKOUT_RECONCILIATION_SECRET`     | VERIFIED ACCESS; production-proven                                                                                    | MISSING                       | No                                                                                            | Rotate the credential through Supabase Edge secret plus Vault if the current value is lost; never recover it from logs. |
+| Retrieve authoritative payment state and decide refund/manual fulfilment          | Stripe live/test operator tooling                             | MISSING current human-access evidence                                                                                 | MISSING                       | No; escalate                                                                                  | Verify Dexter's named Stripe access, MFA, recovery route, and a non-mutating lookup drill before enablement.            |
+| Execute an approved refund or manual fulfilment after the incident decision       | Stripe plus fulfilment/dispatch operations                    | MISSING current named-access/authority evidence                                                                       | MISSING                       | No; escalate                                                                                  | Name and verify the executor and audit route; never make both actions independently.                                    |
+| Manage SES/SNS resources for the future alert route                               | AWS operator                                                  | Console hardware-FIDO VERIFIED; broad human key is disabled; alert-path purpose-specific access remains unimplemented | MISSING                       | No                                                                                            | Use a purpose-specific alert credential; narrower human privilege remains post-launch hardening.                        |
+| Read and administer repository                                                    | GitHub                                                        | VERIFIED ACCESS (`ADMIN`); repository/runbook is publicly readable                                                    | MISSING as a named-user check | Read only                                                                                     | The committed runbook does not depend on Codex, chat history, or a private browser profile.                             |
+| Publish Webflow                                                                   | Webflow site publisher                                        | DOCUMENTED BUT NOT VERIFIED currently; prior production publish exists                                                | MISSING                       | No                                                                                            | Can defer until a release requires Webflow; not needed for emergency rollback.                                          |
+| Recover accounts and operational secrets from another device                      | Authoritative password manager/account recovery               | MISSING                                                                                                               | MISSING                       | Meg needs only her named failsafe credential, not Dexter's secrets                            | No documented, tested two-human recovery path exists.                                                                   |
 
 ### Approved target role for Meg: Model B
 
@@ -117,22 +119,35 @@ one-way control and review that control separately before deployment. Model A (a
 only) does not survive Dexter being unreachable beyond the five-minute rollback SLA. Model C
 (broad infrastructure access) is unnecessary and violates least privilege.
 
+The bounded control is now implemented locally in
+[`checkout-model-b-rollback.md`](./checkout-model-b-rollback.md). It is **not deployed, not
+production-proven, and not available to Meg**. Its fixed path uses a zero-parameter SSM Automation
+document pinned to an immutable Lambda version. The handler issues only the fixed Management API
+DELETE for `CHECKOUT_RESERVATIONS_ENABLED`, using a hidden purpose-specific token with
+`edge_functions_secrets_write` only. IAM requires fixed execution tag
+`TAA-Control=CheckoutModelB`, and Meg may read only receipts carrying that tag; she cannot list,
+browse, or retag unrelated SSM Automation executions. The document itself remains zero-parameter,
+and the handler does not list/read Edge secrets. Model B remains a must-close blocker until the
+non-production idempotency test, credential project-scope gate, IAM simulation, deployment,
+OFF-state production proof, and supervised Meg drill all pass.
+
 ### Must-close human-readiness actions
 
-1. Implement and production-verify the Model B one-way rollback control; have Meg locate this
-   runbook, acknowledge her role, use her named MFA-protected identity, and complete a supervised
-   rollback drill without broad infrastructure access.
-2. Replace the current AWS human-access posture with a documented MFA-protected,
-   least-privilege/temporary-credential model; review and retire unnecessary long-lived access, and
-   establish a recoverable root/emergency-access ownership process.
-3. Establish an authoritative password-manager/account-recovery process that a second human can
+1. Review, non-production-verify, deploy, and production-prove the local Model B one-way rollback
+   control; have Meg locate this runbook, acknowledge her role, use her named MFA-protected identity,
+   and complete a supervised rollback drill without broad infrastructure access.
+2. Establish an authoritative password-manager/account-recovery process that a second human can
    use without Dexter's Mac or primary MFA device, covering Supabase, AWS, Stripe, and GitHub account
    recovery without sharing passwords.
-4. Verify Dexter's named Stripe live/test operational access, MFA and account recovery; name and
+3. Verify Dexter's named Stripe live/test operational access, MFA and account recovery; name and
    verify refund/manual-fulfilment authority; then perform a documentation-only paid-incident lookup
    drill without payment, refund, fulfilment, or checkout mutation.
 
 External alert delivery and its SNS production proof remain a separate must-close launch blocker.
+Brad's console hardware-FIDO protection, root MFA/no root keys, inactive unused service credentials,
+and disabled-at-rest human CLI key satisfy the proportionate launch-critical AWS key condition.
+AdministratorAccess replacement, temporary/federated access, and legacy IAM rationalisation remain
+post-launch hardening unless a broad human credential is proposed for Model B or alert delivery.
 
 ### Single-point-of-failure classification
 
@@ -142,7 +157,7 @@ External alert delivery and its SNS production proof remain a separate must-clos
 | Dexter's Mac                        | SHOULD HARDEN BEFORE ENABLEMENT | Current Supabase/AWS operator sessions are usable here, but alternate-device recovery is unverified.                |
 | One browser profile                 | ACCEPTABLE                      | Emergency rollback, monitor reads, and the committed runbook do not depend on checkout browser state.               |
 | One password-manager account/device | SHOULD HARDEN BEFORE ENABLEMENT | No authoritative manager or second-human recovery process is evidenced.                                             |
-| One MFA device                      | SHOULD HARDEN BEFORE ENABLEMENT | Supabase/GitHub/Stripe recovery and backup-factor ownership are unverified; the current AWS IAM user lacks MFA.     |
+| One MFA device                      | SHOULD HARDEN BEFORE ENABLEMENT | AWS hardware FIDO is verified; Supabase/GitHub/Stripe recovery and backup-factor ownership remain unverified.       |
 | One AWS root/admin identity         | SHOULD HARDEN BEFORE ENABLEMENT | Root MFA is present, but root/emergency ownership and multi-person recovery are not documented or tested.           |
 | One Supabase owner identity         | SHOULD HARDEN BEFORE ENABLEMENT | Dexter's current access works; a separate narrow rollback and control-plane recovery path do not.                   |
 | Codex availability                  | ACCEPTABLE                      | This committed runbook is authoritative and executable without chat history.                                        |
@@ -791,20 +806,22 @@ No SMS destination belongs in Git, this runbook, project memory, logs, or chat.
 
 ## Credential and configuration ownership
 
-| Purpose                             | Name only                                  | Owner/access note                                                                                                       |
-| ----------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Reconciler current credential       | `CHECKOUT_RECONCILIATION_SECRET`           | Supabase Edge secret; Dexter/operator process for approved recovery. Rotate rather than trying to recover a lost value. |
-| Reconciler rotation overlap         | `CHECKOUT_RECONCILIATION_PREVIOUS_SECRET`  | Optional bounded rotation only; remove after callers switch.                                                            |
-| Scheduler reconciliation credential | Vault `taa_checkout_reconciliation_secret` | Read by the private scheduler at runtime; rotate with the Edge copy and do not delete during feature rollback.          |
-| Scheduler function origin           | Vault `taa_supabase_functions_url`         | Origin metadata; preserve during feature rollback.                                                                      |
-| Monitor                             | No delivery credential                     | Private postgres function and cron job.                                                                                 |
-| Global admission                    | `CHECKOUT_RESERVATIONS_ENABLED`            | Supabase Edge configuration; Dexter currently controls mutation. Model B must add a one-way failsafe disable path.      |
-| Canary admission                    | `CHECKOUT_RESERVATIONS_CANARY_SKUS`        | Separate Supabase Edge configuration; not part of Meg's emergency control.                                              |
-| Supabase control-plane access       | Named Supabase user/session                | Dexter's current session is verified; alternate-device and second-human recovery are not.                               |
-| AWS human access                    | Named AWS identity                         | Current access is verified but MFA/least-privilege recovery requirements remain open.                                   |
-| Stripe operator access              | Named Stripe user                          | Current live/test access, MFA, and recovery are not verified.                                                           |
-| GitHub operator access              | Named GitHub user                          | Dexter has current repository administration; public runbook remains readable without Codex.                            |
-| Future alert delivery               | Not provisioned/verified                   | Must use least privilege and secure AWS/Supabase secret storage; names recorded only after implementation.              |
+| Purpose                             | Name only                                  | Owner/access note                                                                                                          |
+| ----------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| Reconciler current credential       | `CHECKOUT_RECONCILIATION_SECRET`           | Supabase Edge secret; Dexter/operator process for approved recovery. Rotate rather than trying to recover a lost value.    |
+| Reconciler rotation overlap         | `CHECKOUT_RECONCILIATION_PREVIOUS_SECRET`  | Optional bounded rotation only; remove after callers switch.                                                               |
+| Scheduler reconciliation credential | Vault `taa_checkout_reconciliation_secret` | Read by the private scheduler at runtime; rotate with the Edge copy and do not delete during feature rollback.             |
+| Scheduler function origin           | Vault `taa_supabase_functions_url`         | Origin metadata; preserve during feature rollback.                                                                         |
+| Monitor                             | No delivery credential                     | Private postgres function and cron job.                                                                                    |
+| Global admission                    | `CHECKOUT_RESERVATIONS_ENABLED`            | Supabase Edge configuration; Dexter controls production mutation. Model B is local only and must still be deployed/proven. |
+| Canary admission                    | `CHECKOUT_RESERVATIONS_CANARY_SKUS`        | Separate Supabase Edge configuration; not part of Meg's emergency control.                                                 |
+| Model B credential                  | `taa/model-b/supabase-management-token`    | Future dedicated AWS secret; not provisioned. Token requires `edge_functions_secrets_write` only.                          |
+| Model B runbook                     | `TAA-EmergencyDisableCheckoutReservations` | Future pinned SSM Automation version; local template only, not deployed or available to Meg.                               |
+| Supabase control-plane access       | Named Supabase user/session                | Dexter's current session is verified; alternate-device and second-human recovery are not.                                  |
+| AWS human access                    | Named AWS identity                         | Current access is verified but MFA/least-privilege recovery requirements remain open.                                      |
+| Stripe operator access              | Named Stripe user                          | Current live/test access, MFA, and recovery are not verified.                                                              |
+| GitHub operator access              | Named GitHub user                          | Dexter has current repository administration; public runbook remains readable without Codex.                               |
+| Future alert delivery               | Not provisioned/verified                   | Must use least privilege and secure AWS/Supabase secret storage; names recorded only after implementation.                 |
 
 Meg must know where the approved Supabase/AWS operator access is held and how to reach Dexter, but
 this runbook does not assert that she currently possesses infrastructure credentials.
@@ -813,16 +830,16 @@ this runbook does not assert that she currently possesses infrastructure credent
 
 These are documentation/access outcomes, not production exercises:
 
-| Scenario                                                           | Who acts / safe action                                                                                      | Result                            | Remaining gap                                                                  |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------ |
-| Dexter receives `ROLLBACK_REQUIRED` and is available               | Dexter preserves evidence, removes only the global flag, verifies OFF, and keeps lifecycle services active. | PASS with current operator access | External alert receipt is not live yet.                                        |
-| Dexter's alert path fails and Meg receives the final failsafe      | Meg reads this runbook and contacts Dexter; she must use Model B if he cannot respond.                      | FAIL currently                    | Failsafe delivery and Meg's named rollback control are not implemented/tested. |
-| Meg receives the failsafe and Dexter is unreachable for 15 minutes | Meg must disable global admission within the five-minute SLA through Model B.                               | FAIL currently                    | Meg has no verified mutation path; escalation-only Model A is insufficient.    |
-| Codex is unavailable                                               | Read this committed document directly from Git; perform no chat-dependent step.                             | PASS for document availability    | Meg has not acknowledged/tested the path.                                      |
-| Dexter's Mac is unavailable                                        | Use an independently recoverable named account and this Git-hosted runbook.                                 | FAIL currently                    | Alternate-device Supabase/Stripe/account recovery is not verified.             |
-| The password-manager primary device is unavailable                 | Use documented second-human recovery without sharing credentials.                                           | FAIL currently                    | No authoritative password-manager or tested recovery process is evidenced.     |
+| Scenario                                                           | Who acts / safe action                                                                                      | Result                            | Remaining gap                                                               |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------------------- |
+| Dexter receives `ROLLBACK_REQUIRED` and is available               | Dexter preserves evidence, removes only the global flag, verifies OFF, and keeps lifecycle services active. | PASS with current operator access | External alert receipt is not live yet.                                     |
+| Dexter's alert path fails and Meg receives the final failsafe      | Meg reads this runbook and contacts Dexter; she must use Model B if he cannot respond.                      | FAIL currently                    | Failsafe delivery is absent and local Model B is not deployed/tested.       |
+| Meg receives the failsafe and Dexter is unreachable for 15 minutes | Meg must disable global admission within the five-minute SLA through Model B.                               | FAIL currently                    | Local source is not a verified mutation path; Model A remains insufficient. |
+| Codex is unavailable                                               | Read this committed document directly from Git; perform no chat-dependent step.                             | PASS for document availability    | Meg has not acknowledged/tested the path.                                   |
+| Dexter's Mac is unavailable                                        | Use an independently recoverable named account and this Git-hosted runbook.                                 | FAIL currently                    | Alternate-device Supabase/Stripe/account recovery is not verified.          |
+| The password-manager primary device is unavailable                 | Use documented second-human recovery without sharing credentials.                                           | FAIL currently                    | No authoritative password-manager or tested recovery process is evidenced.  |
 
-Until all four human-readiness actions above and external alert delivery are proven, a critical
+Until all three human-readiness actions above and external alert delivery are proven, a critical
 incident can become unrecoverable when Dexter or his primary device is unavailable. Global
 reservations must remain OFF.
 
