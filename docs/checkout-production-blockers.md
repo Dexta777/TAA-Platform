@@ -120,9 +120,24 @@ webhooks, targeted recovery, and canary admission available. The initial launch 
 24 hours and the first 10 successful non-canary reservation-v1 checkouts, whichever is longer. The
 monitoring/rollback-threshold blocker is closed. The authoritative operator/incident runbook is
 `docs/checkout-operator-runbook.md`; its source-consistency and eight-scenario tabletop review pass,
-closing the documentation blocker pending human review and provenance commit. External alert
-routing, human readiness/access review and a separate launch decision remain open. Global
-reservations remain off.
+closing the documentation blocker. The subsequent human-readiness/access review found Dexter's
+current GitHub, linked Supabase/database, Edge-secret, and AWS operator surfaces usable, but did not
+find a verified Meg rollback path, alternate-device Supabase/Stripe recovery, or an authoritative
+two-human credential-recovery process. The current AWS human IAM access also does not meet the
+required MFA/least-privilege standard. Human readiness is therefore **READY AFTER FOUR ACTIONS**:
+
+1. implement and drill a one-way, idempotent Model B rollback control for Meg that can only remove
+   `CHECKOUT_RESERVATIONS_ENABLED`;
+2. harden AWS human access with MFA, least privilege/temporary credentials, and documented
+   root/emergency recovery;
+3. establish and test a two-human password-manager/account-recovery path independent of Dexter's
+   Mac and primary MFA device;
+4. verify Dexter's named Stripe live/test access, MFA/recovery, refund/manual-fulfilment authority,
+   and non-mutating paid-incident lookup procedure.
+
+The full access matrix and six-scenario failover tabletop are in
+`docs/checkout-operator-runbook.md`. External alert routing, these four human-readiness actions and a
+separate launch decision remain open. Global reservations remain off.
 
 The historical `legacy/webflow/order-confirmation.js` reference is not a deployable function or an
 approved production path. `get-order-confirmation` must never be restored as part of rollback. Only
