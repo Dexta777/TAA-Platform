@@ -63,6 +63,12 @@ Before enabling it in production:
 9. Keep the retired `get-order-confirmation` endpoint absent and verify that only the
    capability-authorized replacement serves order confirmation PII.
 
+This list is the original activation checklist, not a claim that every item remains open. The
+dated status records below are authoritative: scheduler, lifecycle-monitoring, operator-runbook,
+payment/recovery and confirmation blockers are closed at their recorded evidence layers. External
+alert delivery, human readiness/access review and a separate global-enable authorization remain
+open.
+
 Current scheduler status (2026-08-19): additive migration
 `20260824120300_checkout_reconciliation_scheduler.sql` is deployed. The production job
 `taa-checkout-reconciliation-v1` is active every minute and invokes the reconciler through `pg_net`
@@ -94,25 +100,29 @@ External-alerting status (2026-08-19): a clean read-only inventory found no auth
 WorkMail/SES, SMTP, Slack/Teams, or other operator-alert route in repository source/history,
 production Edge-secret names, Vault-secret names, current process configuration, deployed cron, or
 Edge Functions. Target ownership is subsequently approved: warning and warning-recovery email goes
-to `support@theanimalalchemist.com`; rollback-required email goes to that address and
-`meg@theanimalalchemist.com`; rollback-required also independently attempts Amazon SNS SMS. Dexter
-is the primary operator and Meg the secondary/escalation operator. Trello is not an emergency
-channel.
+to `support@theanimalalchemist.com`; initial rollback-required notification goes to that address and
+Dexter via Amazon SNS SMS. Meg is the final failsafe through `meg@theanimalalchemist.com` and SNS SMS
+if Dexter is unavailable or has not acknowledged within two minutes; she is not the initial
+critical recipient. Trello is not an emergency channel.
 
-That approval is architecture, not implementation evidence. No SNS destination/topic, SES or
-WorkMail programmatic sending capability, alert IAM identity, delivery credential, outbox, worker,
-cron job, deployment, synthetic notification or external receipt has been verified or created. No
-SMS destination may enter repository files, documentation, logs or project memory. External alert
-routing remains blocked pending actual AWS capability inspection, secure provisioning,
-implementation and production delivery verification; global reservations remain off.
+That approval is architecture, not implementation evidence. AWS discovery established SES
+production sending capability and a verified TAA-domain identity in `eu-west-1`; SNS SMS production
+access remains pending. No alert SNS topic/subscription, purpose-specific IAM identity, delivery
+credential, outbox, worker, cron job, deployment, synthetic notification or external receipt has
+been verified or created. No SMS destination may enter repository files, documentation, logs or
+project memory. External alert routing remains blocked pending secure provisioning, implementation
+and production delivery verification; global reservations remain off.
 
 The explicit operator response and complete reason-code catalogue are documented in
 `docs/checkout-lifecycle-monitoring.md`. Feature rollback removes
 `CHECKOUT_RESERVATIONS_ENABLED`, leaving existing reservation-v1 attempts, reconciliation, Stripe
 webhooks, targeted recovery, and canary admission available. The initial launch watch is at least
 24 hours and the first 10 successful non-canary reservation-v1 checkouts, whichever is longer. The
-monitoring/rollback-threshold blocker is closed; the authoritative operator/incident runbook and a
-separate launch decision remain open. Global reservations remain off.
+monitoring/rollback-threshold blocker is closed. The authoritative operator/incident runbook is
+`docs/checkout-operator-runbook.md`; its source-consistency and eight-scenario tabletop review pass,
+closing the documentation blocker pending human review and provenance commit. External alert
+routing, human readiness/access review and a separate launch decision remain open. Global
+reservations remain off.
 
 The historical `legacy/webflow/order-confirmation.js` reference is not a deployable function or an
 approved production path. `get-order-confirmation` must never be restored as part of rollback. Only
@@ -157,8 +167,9 @@ Slice 7C1 exposes no Notify action and makes no notification or delivery promise
 The reconciler now invokes bounded service-only cleanup for expired active reservation-v1 attempts
 that provably have no intent, reservation, live pointer, or active admission. It retains those rows
 as `expired` audit history. The reconciler is scheduled by the active production job documented
-above; global reservation enablement remains blocked on monitoring thresholds and the operator
-runbook.
+above. Global reservation enablement remains blocked on external alert routing, human
+readiness/access review and a separate enablement decision; the monitoring and operator-runbook
+blockers are closed.
 
 ## Klaviyo delivery after webhook replay
 

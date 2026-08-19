@@ -6,6 +6,9 @@ This document defines the reservation-v1 lifecycle health contract. The monitor 
 database state once per minute and records a private, credential-free snapshot. It does not repair
 checkout state, call Stripe, enable reservations, or execute rollback automatically.
 
+Operational response is defined in the
+[reservation-v1 checkout operator runbook](./checkout-operator-runbook.md).
+
 The authoritative operator classification is one of:
 
 - `HEALTHY`: no warning or rollback condition is present.
@@ -45,27 +48,31 @@ Slack/Teams webhook, alert recipient, delivery worker, or independent critical f
 Supabase local/auth SMTP examples are not a production channel. Existing Klaviyo catalogue/order
 credentials are not an operator-incident alert transport.
 
-External routing therefore remains blocked before implementation. It must be resumed only after an
-AWS capability and secure destination provisioning have been verified. The approved target
-architecture is:
+External routing therefore remains blocked before implementation. AWS discovery has since verified
+SES production sending capability for the TAA domain in `eu-west-1`; Amazon SNS SMS production
+access remains pending. Secure destination and least-privilege delivery provisioning have not been
+completed. The approved target architecture is:
 
-| Transition                              | Target routing                                                                   |
-| --------------------------------------- | -------------------------------------------------------------------------------- |
-| `HEALTHY` recurrence                    | No external notification                                                         |
-| Entry to `WARNING`                      | Email `support@theanimalalchemist.com`                                           |
-| `WARNING` recovery                      | Email `support@theanimalalchemist.com`                                           |
-| Entry/escalation to `ROLLBACK_REQUIRED` | Email `support@theanimalalchemist.com` and `meg@theanimalalchemist.com`; SNS SMS |
-| `ROLLBACK_REQUIRED` recovery            | Email `support@theanimalalchemist.com` and `meg@theanimalalchemist.com`          |
+| Transition                                 | Target routing                                               |
+| ------------------------------------------ | ------------------------------------------------------------ |
+| `HEALTHY` recurrence                       | No external notification                                     |
+| Entry to `WARNING`                         | Email `support@theanimalalchemist.com`                       |
+| `WARNING` recovery                         | Email `support@theanimalalchemist.com`                       |
+| Initial entry to `ROLLBACK_REQUIRED`       | Email `support@theanimalalchemist.com`; Dexter via SNS SMS   |
+| Final failsafe for unacknowledged critical | Email `meg@theanimalalchemist.com`; Meg via SNS SMS          |
+| `ROLLBACK_REQUIRED` recovery               | Email support; include Meg if the final failsafe was engaged |
 
-Dexter owns primary response and Meg owns secondary/escalation response. Amazon SNS SMS is the
-approved independent critical fallback; Trello is not an emergency channel. Email and SMS delivery
-must be attempted and persisted independently so failure of either does not prevent the other.
+Dexter owns primary response. Meg is the secondary/final failsafe, not an initial critical
+recipient. Engage the final failsafe if Dexter is unavailable or has not acknowledged within two
+minutes, preserving the five-minute rollback SLA. Amazon SNS SMS is the approved independent
+critical fallback; Trello is not an emergency channel. Email and SMS delivery must be attempted and
+persisted independently so failure of either does not prevent the other.
 
-This table is an approved target, not deployed evidence. No SNS destination/topic, SES sending
-capability, WorkMail programmatic transport, IAM identity, delivery credential or external receipt
-has yet been verified. No SMS destination may be stored in Git, documentation, logs or project
-memory. Implementation must first verify existing AWS account/region capability, least-privilege
-authentication, secure AWS-owned SMS destination configuration, and a safe production test path.
+This table is an approved target, not deployed evidence. No alert SNS topic/subscription,
+purpose-specific IAM identity, delivery credential, outbox/worker, synthetic notification or
+external receipt has yet been verified. No SMS destination may be stored in Git, documentation,
+logs or project memory. Implementation must establish least-privilege authentication, secure
+AWS-owned SMS destination configuration, and a safe production test path.
 
 The eventual delivery layer must consume the authoritative snapshots rather than recalculate health.
 It must emit no message for `HEALTHY` recurrence; alert once on entry to `WARNING` or
