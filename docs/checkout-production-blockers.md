@@ -74,8 +74,29 @@ scheduled empty-queue executions completed at `13:04`, `13:05`, and `13:06Z` wit
 provisional stale-worker threshold is five minutes at the one-minute cadence. Rollback resolves the
 exact named job and calls `cron.alter_job(jobid, active := false)` while retaining the reconciler,
 webhook lifecycle and Vault credential. The scheduler/heartbeat blocker is closed; alert routing,
-objective rollback thresholds and the operator runbook remain open. Global reservations remain
-off.
+objective rollback thresholds and the operator runbook were still open at that scheduler-only
+checkpoint. The monitoring record below supersedes the threshold status. Global reservations
+remain off.
+
+Current lifecycle-monitoring status (2026-08-19): additive migration
+`20260824120400_checkout_lifecycle_monitoring.sql` is deployed. The independent production job
+`taa-checkout-health-monitor-v1` is active every minute and records private, minute-idempotent,
+credential-free snapshots with an explicit `HEALTHY`, `WARNING`, or `ROLLBACK_REQUIRED`
+classification and reason codes. Three consecutive scheduled snapshots at `13:47`, `13:48`, and
+`13:49Z` were `HEALTHY` with empty reason sets; reconciliation remained current, inventory remained
+A `4/0/4`, BASE `1/0/1`, C `4/0/4`, and all synthetic lifecycle/incident/job counts remained zero.
+The monitor, scheduler, and worker heartbeat warning boundary is two minutes and rollback boundary
+is five minutes. Inventory/paid/order integrity, paid release, duplicate finalization, paid manual
+review, severe lifecycle incidents, and scheduler authentication/configuration failures require
+immediate rollback classification. The monitor never mutates checkout state or feature flags.
+
+The explicit operator response and complete reason-code catalogue are documented in
+`docs/checkout-lifecycle-monitoring.md`. Feature rollback removes
+`CHECKOUT_RESERVATIONS_ENABLED`, leaving existing reservation-v1 attempts, reconciliation, Stripe
+webhooks, targeted recovery, and canary admission available. The initial launch watch is at least
+24 hours and the first 10 successful non-canary reservation-v1 checkouts, whichever is longer. The
+monitoring/rollback-threshold blocker is closed; the authoritative operator/incident runbook and a
+separate launch decision remain open. Global reservations remain off.
 
 The historical `legacy/webflow/order-confirmation.js` reference is not a deployable function or an
 approved production path. `get-order-confirmation` must never be restored as part of rollback. Only
@@ -215,10 +236,9 @@ before the next target on any retry, manual-review, or unexpected response. Supp
 reconciliation secret through the operator process environment; never place it in command
 arguments, source, logs, documentation, or browser tooling.
 
-Production verification status: unauthenticated ingress has been verified to reject access with
-HTTP 401. An authenticated targeted production smoke using `CHECKOUT_RECONCILIATION_SECRET` has not
-yet been executed, so this path is not yet authenticated-production-proven. That handler-level
-smoke remains required before global reservations are enabled.
+Production verification status: unauthenticated ingress rejects access with HTTP 401, and the
+authenticated exact-attempt production smoke is PRODUCTION-PROVEN. The evidence is retained in
+`Codex/VERIFICATION-LOG.md`; it must not be rerun merely for repetition.
 
 ## Legacy endpoint retirement
 
