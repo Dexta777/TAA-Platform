@@ -53,6 +53,142 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-19 — Checkout Lifecycle Monitoring Provenance Commit Created, Not Pushed
+
+**Record type:** CONTEMPORANEOUS SOURCE-CONTROL AND FOCUSED LOCAL VERIFICATION EVIDENCE
+**Evidence grade:** LOCAL COMMIT PROVENANCE FOR ALREADY-DEPLOYED PRODUCTION MONITORING
+**Status:** IMPLEMENTATION COMMIT CREATED; NO PUSH OR PRODUCTION MUTATION
+
+Starting from `27fb9dd31463e508f0561b63d4ed867889f72229`, all seven monitoring implementation,
+test, operational-contract and project-memory paths were reviewed. The migration and two test
+files had not changed after the recorded local verification, deployment and production-monitor
+checkpoint; their filesystem modification times preceded deployment, while later changes were
+limited to documentation and evidence. The focused lifecycle-monitor pgTAP rerun passed `48/48`.
+
+The first concurrency-harness rerun proved caller B waited on caller A and retained one canonical
+snapshot, but the snapshot classified `ROLLBACK_REQUIRED` because the local recurring reconciler
+had added newer `vault_configuration_missing` rows after the harness's fixed fixture timestamp.
+This was local fixture contamination, not a monitoring-code failure. A read-only local query proved
+the exact reason codes were `scheduler_configuration_failure` and `worker_heartbeat_missing`.
+After temporarily disabling only the local reconciliation cron job, clearing its local test ledger,
+and restoring that local job automatically, the unchanged two-caller harness passed both lock and
+single-canonical-`HEALTHY` assertions. Production cron, Vault, monitoring and checkout state were
+not contacted or changed.
+
+Focused permission checks confirmed snapshot RLS, no `anon`, `authenticated`, or `service_role`
+table access, no execution access to the three private monitor functions, `SECURITY DEFINER`, empty
+hardened search paths, one active minute-cadence monitor job, and credential-free cron metadata.
+Targeted Markdown Prettier, shell syntax, sensitive-pattern scanning, staged-diff checking and
+`git diff --check` all passed.
+
+Commit `27d19a78ddd16002c98713946e866aac9c2851f0`, titled
+`feat: monitor checkout lifecycle health`, contains exactly:
+
+- `supabase/migrations/20260824120400_checkout_lifecycle_monitoring.sql`;
+- `supabase/tests/database/checkout-lifecycle-monitoring.test.sql`;
+- `supabase/tests/concurrency/checkout-health-monitor-concurrency.sh`;
+- `docs/checkout-lifecycle-monitoring.md`;
+- `docs/checkout-production-blockers.md`.
+
+The migration filename and semantics remain those already applied and production-verified. It
+adds only private monitoring state and the independent `taa-checkout-health-monitor-v1` job; it
+does not mutate checkout/inventory lifecycle state, access credentials, change cron/Vault, or
+enable or disable global reservations. No push was performed. Current production health remains
+the last recorded `HEALTHY` checkpoint, and global reservations remain OFF. Remaining readiness
+gates are the authoritative operator/incident runbook, external alert/log routing, human readiness
+review, and separate explicit global-enable authorisation.
+
+## 2026-08-19 — Reservation-v1 Lifecycle Monitor and Rollback Thresholds Production-Verified
+
+**Record type:** CONTEMPORANEOUS SOURCE, LOCAL TEST, DEPLOYMENT, RUNTIME AND PRODUCTION EVIDENCE
+**Evidence grade:** PRODUCTION SCHEDULED MONITORING WITH LOCAL FAILURE-INJECTION REGRESSION
+**Status:** PASS; MONITORING / ROLLBACK-THRESHOLD BLOCKER CLOSED; GLOBAL RESERVATIONS OFF
+
+The task began on clean synchronized `main` and `origin/main` at
+`27fb9dd31463e508f0561b63d4ed867889f72229`, ahead/behind `0/0`, with nothing staged. Read-only
+production inspection at `2026-08-19T13:30:43.291765Z` and the final pre-deploy checkpoint at
+`13:46:07.447243Z` both proved A `4/0/4`, BASE `1/0/1`, C `4/0/4`; active reservation-v1 attempts,
+active intents, active admissions, held/due reservations, open incidents, and open reconciliation
+jobs all `0`. `taa-checkout-reconciliation-v1` was active every minute, the latest worker result was
+HTTP 200 `empty_queue`, failures in the prior 10 minutes were `0`, no health-monitor job existed,
+and `CHECKOUT_RESERVATIONS_ENABLED` remained absent by secret-name metadata only.
+
+Source and lifecycle inspection established that a local reservation deadline is not authoritative
+unpaid evidence; only a persisted materialised Session past `stripe_session_expires_at` can drive the
+authoritative-overdue monitor. Reconciliation claims at most 25 jobs, uses two-minute worker leases,
+and retries after one minute. The selected thresholds therefore warn after two minutes and require
+rollback after five minutes for scheduler, worker, monitor, pending HTTP, due queue, authoritative
+overdue, and unpaid manual-review age. More than one 25-job due batch requires rollback. Three
+consecutive worker failures require rollback; one terminal failure warns. HTTP 401/403, Vault
+configuration failure, negative ATS, impossible reservation ownership, paid/order cardinality,
+consumed/order mismatch, duplicate finalization, paid inventory mismatch, paid release, paid
+lifecycle mismatch, paid manual review, and severe open lifecycle incidents require immediate
+`ROLLBACK_REQUIRED` classification.
+
+Migration `20260824120400_checkout_lifecycle_monitoring.sql` adds only private monitoring
+infrastructure: a 30-day snapshot ledger, a private evaluator, minute-idempotent recorder, stale-
+monitor-aware current-health reader, and one independent job named
+`taa-checkout-health-monitor-v1` at `* * * * *`. It emits only `HEALTHY`, `WARNING`, or
+`ROLLBACK_REQUIRED`, aggregate non-sensitive metrics, and explicit reason codes. The table has RLS;
+`anon`, `authenticated`, and `service_role` cannot read it or execute monitor controls. Functions
+are `postgres`-owned, `SECURITY DEFINER`, and use an empty hardened search path. Monitoring performs
+no repair, Stripe call, checkout mutation, inventory mutation, credential access, or feature-flag
+change.
+
+Focused test development retained its failures honestly. The first run stopped after 8 assertions
+because PostgreSQL has no `min(uuid)` aggregate. The next two runs exposed an expired browser-
+admission fixture and then a fixture violating the reservation expiry constraint. A later full run
+showed that nullable joins hid stale unpaid-manual-review age and that the declared pgTAP plan was
+five assertions short. Each defect was corrected before deployment; none reached production.
+
+Final current-working-tree verification passed:
+
+- clean replay of 21 migrations: PASS;
+- focused lifecycle-monitor pgTAP: `48/48` PASS;
+- complete database suite: `552/552` PASS across 17 files;
+- monitor two-caller concurrency: PASS; caller B waited on caller A's advisory lock and both
+  converged on exactly one canonical `HEALTHY` minute snapshot;
+- existing inventory reservation concurrency: PASS, including one final-unit winner and no
+  deadlock under opposite resource order;
+- existing paid/reconciliation lifecycle concurrency: PASS, including exactly one consumed order,
+  duplicate-finalizer convergence, and paid-after-release review preservation;
+- database lint across `extensions`, `private`, and `public`: PASS with no schema errors;
+- reconciliation/auth Deno suite: `7/7` PASS;
+- reconciler Edge Function typecheck: PASS;
+- shell syntax, targeted Markdown Prettier, sensitive-pattern scan, and `git diff --check`: PASS.
+
+The linked pre-deploy dry run listed only
+`20260824120400_checkout_lifecycle_monitoring.sql`, with no seed or role changes. A final fetch
+confirmed local/remote Git divergence `0`, and the global flag remained absent. The linked
+production deployment then applied exactly migration `20260824120400`. No Edge Function, frontend,
+Webflow asset, checkout business logic, Vault value, scheduler credential, or unrelated migration
+was deployed.
+
+Production verification proved exactly one active `taa-checkout-health-monitor-v1` job at the
+one-minute cadence and exact command `SELECT private.record_checkout_health_snapshot_v1();`.
+Deployed table/function ownership, RLS, revocations, `SECURITY DEFINER`, and hardened search paths
+matched the reviewed migration. Three consecutive real cron-generated monitor cycles completed:
+
+- `2026-08-19T13:47:00.061343Z`: cron `succeeded`, snapshot `HEALTHY`, reason codes empty;
+- `2026-08-19T13:48:00.018467Z`: cron `succeeded`, snapshot `HEALTHY`, reason codes empty;
+- `2026-08-19T13:49:00.031318Z`: cron `succeeded`, snapshot `HEALTHY`, reason codes empty.
+
+At the final `2026-08-19T13:49:33.331906Z` checkpoint, the current monitor age was 33 seconds, the
+reconciliation scheduler and worker heartbeats were current, worker failures in the prior 10
+minutes were `0`, and all monitored integrity/backlog counts were `0`. Inventory remained A
+`4/0/4`, BASE `1/0/1`, C `4/0/4`; active attempts, intents, admissions, held/due reservations, open
+incidents, and open jobs remained `0`. No production failure was fabricated or injected.
+
+The explicit human rollback contract removes `CHECKOUT_RESERVATIONS_ENABLED`, leaving existing
+reservation-v1 attempts, the reconciler schedule, Stripe webhooks, targeted recovery, and canary
+admission available. No automatic rollback exists. The launch watch is at least 24 hours and the
+first 10 successful non-canary reservation-v1 checkouts, whichever is longer, with required checks
+before enablement, after first admission, after first successful payment, and at 15-minute,
+one-hour, four-hour, and 24-hour checkpoints. Database monitoring deliberately does not invent an
+HTTP checkout error-rate metric because no accurate request denominator is persisted; external
+log/alert routing remains part of the operator/incident-runbook work. Global reservations remained
+OFF throughout.
+
 ## 2026-08-19 — Reconciliation Scheduler Runtime Provenance Commit Created, Not Pushed
 
 **Record type:** CONTEMPORANEOUS SOURCE-CONTROL, FOCUSED TEST AND READ-ONLY PRODUCTION PARITY EVIDENCE
