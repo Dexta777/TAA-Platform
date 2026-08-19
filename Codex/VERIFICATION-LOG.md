@@ -53,6 +53,66 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-19 — External Checkout Alert Target Ownership Approved; Implementation Still Open
+
+**Record type:** OPERATOR-APPROVED TARGET ARCHITECTURE; NO IMPLEMENTATION OR DELIVERY EVIDENCE
+**Evidence grade:** DOCUMENTED OWNERSHIP AND ROUTING CONTRACT ONLY
+**Status:** EXTERNAL ALERT BLOCKER OPEN
+
+The approved future routing contract is: `WARNING` and recovery from warning email
+`support@theanimalalchemist.com`; `ROLLBACK_REQUIRED` email
+`support@theanimalalchemist.com` and `meg@theanimalalchemist.com` plus an independently attempted
+Amazon SNS SMS fallback; and recovery from `ROLLBACK_REQUIRED` email both addresses. Dexter is the
+primary operator and Meg is the secondary/escalation operator. Trello is not an emergency channel.
+
+This approval does not establish that SES, SNS, WorkMail programmatic sending, IAM, an SMS
+destination, an outbox, a delivery worker, retries, or external receipt is configured or working.
+No SMS destination is approved for repository, documentation, log, project-memory or Codex-output
+storage. Actual AWS account/region capability, least-privilege authentication and secure destination
+provisioning must be inspected before implementation. No production or AWS mutation accompanied
+this record; no automatic rollback exists; global reservations remain OFF.
+
+## 2026-08-19 — External Checkout Alert Routing Blocked Before Implementation
+
+**Record type:** CONTEMPORANEOUS SOURCE, CONFIGURATION-METADATA AND READ-ONLY PRODUCTION EVIDENCE
+**Evidence grade:** CHANNEL-INVENTORY AND PRODUCTION PREFLIGHT; NO DELIVERY IMPLEMENTATION
+**Status:** BLOCKED; NO AUTHENTICATED EXTERNAL CHANNEL OR INDEPENDENT FALLBACK ESTABLISHED
+
+After a fetch, local `main` and `origin/main` were clean and synchronized at
+`5856838a058afd9f6c6ba3a04f51850c9970a3b9`, ahead/behind `0/0`, with nothing staged. A supported
+linked-project read-only query at `2026-08-19T15:16:05.086352Z` returned current health `HEALTHY`,
+empty reason codes, monitor age about 5 seconds, worker age about 60 seconds, consecutive worker
+failures `0`, and due reconciliation jobs `0`. Both `taa-checkout-health-monitor-v1` and
+`taa-checkout-reconciliation-v1` were active at `* * * * *`.
+
+The same checkpoint proved inventory A `4/0/4`, BASE `1/0/1`, C `4/0/4`; active reservation-v1
+attempts, intents, admissions, held/due reservations, open incidents, and open jobs were all `0`.
+Edge-secret metadata did not contain `CHECKOUT_RESERVATIONS_ENABLED`, so global reservations
+remained OFF. Production migration history ended at `20260824120400` and production cron contained
+only the health monitor and reconciler jobs.
+
+Channel discovery inspected current repository source and history, operations/service documentation,
+Edge-secret names, Vault-secret names, current process variable names, Edge Functions, package
+dependencies, and cron metadata. No implemented n8n workflow, n8n endpoint/credential, WorkMail or
+SES transport, SMTP provider, Slack/Teams webhook, operator recipient, alert delivery worker, or
+independent critical fallback was found. The repository contains only commented Supabase local/auth
+SMTP examples; they are not an operational production alert channel. Existing Klaviyo credentials
+support catalogue/order integration and were not reclassified as a private incident-alert route.
+No secret value was inspected or emitted.
+
+Without an authenticated destination and recipient/acknowledgement owner, a durable outbox could
+not be connected to a real external delivery path, and the required production synthetic WARNING,
+ROLLBACK_REQUIRED, and RECOVERY deliveries could not be verified. Building a generic webhook or
+selecting a new SaaS would exceed the evidenced architecture and still leave the independent
+fallback unresolved. Therefore no migration, Edge Function, test fixture, cron job, Vault/secret
+write, alert delivery, deployment, checkout mutation, or automatic rollback was performed.
+
+The exact unblock requirement is an explicit operator decision naming: (1) the currently
+operational primary external channel and destination; (2) an independent critical fallback; (3)
+recipient, acknowledgement, and escalation ownership; and (4) the approved non-persistent secret
+provisioning method. The authoritative health thresholds remain unchanged, production health
+remains at the recorded `HEALTHY` checkpoint, and global reservations remain OFF.
+
 ## 2026-08-19 — Checkout Lifecycle Monitoring Provenance Commit Created, Not Pushed
 
 **Record type:** CONTEMPORANEOUS SOURCE-CONTROL AND FOCUSED LOCAL VERIFICATION EVIDENCE

@@ -36,6 +36,45 @@ The database does not persist a sufficiently accurate denominator for a checkout
 metric. Edge/log error-rate alerting therefore remains a separate external-observability concern;
 the lifecycle monitor does not fabricate one from incidents or reconciliation records.
 
+## External Alert Routing Readiness
+
+The health evaluator and snapshots are production-active, but no authenticated external delivery
+channel is currently represented in the repository or production configuration metadata. The
+2026-08-19 channel inventory found no n8n workflow/credential, operational mail transport,
+Slack/Teams webhook, alert recipient, delivery worker, or independent critical fallback. Commented
+Supabase local/auth SMTP examples are not a production channel. Existing Klaviyo catalogue/order
+credentials are not an operator-incident alert transport.
+
+External routing therefore remains blocked before implementation. It must be resumed only after an
+AWS capability and secure destination provisioning have been verified. The approved target
+architecture is:
+
+| Transition                              | Target routing                                                                   |
+| --------------------------------------- | -------------------------------------------------------------------------------- |
+| `HEALTHY` recurrence                    | No external notification                                                         |
+| Entry to `WARNING`                      | Email `support@theanimalalchemist.com`                                           |
+| `WARNING` recovery                      | Email `support@theanimalalchemist.com`                                           |
+| Entry/escalation to `ROLLBACK_REQUIRED` | Email `support@theanimalalchemist.com` and `meg@theanimalalchemist.com`; SNS SMS |
+| `ROLLBACK_REQUIRED` recovery            | Email `support@theanimalalchemist.com` and `meg@theanimalalchemist.com`          |
+
+Dexter owns primary response and Meg owns secondary/escalation response. Amazon SNS SMS is the
+approved independent critical fallback; Trello is not an emergency channel. Email and SMS delivery
+must be attempted and persisted independently so failure of either does not prevent the other.
+
+This table is an approved target, not deployed evidence. No SNS destination/topic, SES sending
+capability, WorkMail programmatic transport, IAM identity, delivery credential or external receipt
+has yet been verified. No SMS destination may be stored in Git, documentation, logs or project
+memory. Implementation must first verify existing AWS account/region capability, least-privilege
+authentication, secure AWS-owned SMS destination configuration, and a safe production test path.
+
+The eventual delivery layer must consume the authoritative snapshots rather than recalculate health.
+It must emit no message for `HEALTHY` recurrence; alert once on entry to `WARNING` or
+`ROLLBACK_REQUIRED`; escalate severity or materially new reason sets; deduplicate identical state;
+retain a durable per-channel outbox with retry state and bounded reminders; and emit exactly one
+recovery when the state returns to `HEALTHY`. No alert may mutate checkout state or
+`CHECKOUT_RESERVATIONS_ENABLED`. No alert implementation, credential, cron job, production test,
+automatic rollback or verified transport exists yet.
+
 ## Thresholds and Reason Codes
 
 The reconciliation and monitor cadence is one minute. Two minutes allows one missed/slow cycle and

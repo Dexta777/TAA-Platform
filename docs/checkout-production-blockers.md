@@ -90,6 +90,22 @@ is five minutes. Inventory/paid/order integrity, paid release, duplicate finaliz
 review, severe lifecycle incidents, and scheduler authentication/configuration failures require
 immediate rollback classification. The monitor never mutates checkout state or feature flags.
 
+External-alerting status (2026-08-19): a clean read-only inventory found no authenticated n8n,
+WorkMail/SES, SMTP, Slack/Teams, or other operator-alert route in repository source/history,
+production Edge-secret names, Vault-secret names, current process configuration, deployed cron, or
+Edge Functions. Target ownership is subsequently approved: warning and warning-recovery email goes
+to `support@theanimalalchemist.com`; rollback-required email goes to that address and
+`meg@theanimalalchemist.com`; rollback-required also independently attempts Amazon SNS SMS. Dexter
+is the primary operator and Meg the secondary/escalation operator. Trello is not an emergency
+channel.
+
+That approval is architecture, not implementation evidence. No SNS destination/topic, SES or
+WorkMail programmatic sending capability, alert IAM identity, delivery credential, outbox, worker,
+cron job, deployment, synthetic notification or external receipt has been verified or created. No
+SMS destination may enter repository files, documentation, logs or project memory. External alert
+routing remains blocked pending actual AWS capability inspection, secure provisioning,
+implementation and production delivery verification; global reservations remain off.
+
 The explicit operator response and complete reason-code catalogue are documented in
 `docs/checkout-lifecycle-monitoring.md`. Feature rollback removes
 `CHECKOUT_RESERVATIONS_ENABLED`, leaving existing reservation-v1 attempts, reconciliation, Stripe

@@ -18,15 +18,14 @@ keeping global reservations off. Checkout correctness defects found by the payme
 have been corrected, focused production re-verification is complete, and the mandatory recurring
 reconciliation scheduler plus dual-layer heartbeat are production-active. The database-native
 lifecycle monitor and explicit rollback thresholds are also production-active and verified. The
-remaining global-enable readiness work is the operator/incident runbook and an explicit launch
-decision, not another repetition of already-closed payment or recovery scenarios.
+remaining global-enable readiness work is an authenticated external alert route with an independent
+critical fallback, the operator/incident runbook, human readiness review, and an explicit launch
+decision—not another repetition of already-closed payment or recovery scenarios.
 
 ## Git and Deployment State
 
-- `origin/main` remains at `27fb9dd31463e508f0561b63d4ed867889f72229`.
-- Local `main` contains unpushed monitoring provenance: implementation commit
-  `27d19a78ddd16002c98713946e866aac9c2851f0` plus the project-memory evidence update in
-  this commit.
+- Local `main` and `origin/main` are synchronized at
+  `5856838a058afd9f6c6ba3a04f51850c9970a3b9`.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -41,7 +40,7 @@ decision, not another repetition of already-closed payment or recovery scenarios
   `762b3116dc76961dc32497b890369a8e951ff543`.
 - Monitoring migration `20260824120400_checkout_lifecycle_monitoring.sql` is deployed in production
   and represented with its focused database/concurrency regressions and operational documentation
-  in local commit `27d19a78ddd16002c98713946e866aac9c2851f0`.
+  in remote commit `27d19a78ddd16002c98713946e866aac9c2851f0`.
 
 ## Reservation-v1 Matrix
 
@@ -75,8 +74,8 @@ or repeated merely to improve labels without a documented safe runtime mechanism
 
 ## Latest Recorded Production Baseline
 
-The monitoring activation final safety checkpoint at `2026-08-19T13:49:33Z` confirmed the synthetic
-environment remains:
+The external-alerting preflight at `2026-08-19T15:16:05Z` confirmed the synthetic environment
+remains:
 
 | SKU               | Physical | Reserved | ATS |
 | ----------------- | -------: | -------: | --: |
@@ -97,7 +96,7 @@ The same checkpoint recorded:
 - open reconciliation jobs: 0;
 - empty synthetic basket.
 
-This is the latest recorded production baseline from the monitoring activation verification.
+This is the latest recorded production baseline from the external-alerting preflight.
 
 ## Production Configuration
 
@@ -127,6 +126,9 @@ This is the latest recorded production baseline from the monitoring activation v
 - Three consecutive real monitor cycles at `2026-08-19T13:47:00Z`, `13:48:00Z`, and `13:49:00Z`
   completed successfully as `HEALTHY` with empty reason-code sets. At `13:49:33Z`, monitor age was
   33 seconds; the reconciler scheduler and worker remained current with zero recent failures.
+- A later read-only checkpoint at `2026-08-19T15:16:05Z` remained `HEALTHY`: monitor age was about
+  5 seconds, worker age about 60 seconds, consecutive worker failures and due jobs were `0`, and all
+  synthetic lifecycle/incident/job counts remained `0`.
 - Monitor, scheduler, and worker heartbeat warning thresholds are two minutes and rollback
   thresholds are five minutes. Critical inventory, paid/order, paid-release, duplicate-finalization,
   paid/manual-review, scheduler-authentication, and severe lifecycle-incident conditions require
@@ -139,7 +141,29 @@ This is the latest recorded production baseline from the monitoring activation v
 
 ## Open Global-Enable Blockers
 
-### 1. Operator Runbook
+### 1. External Alert Routing
+
+A repository, Git-history, production Edge-secret-name, Vault-secret-name, cron, and current-process
+inventory found no authenticated n8n workflow, operational mail transport, Slack/Teams webhook,
+alert destination, or independent critical fallback. Supabase's commented local/auth SMTP examples
+are not a configured production notification channel, and Klaviyo's catalogue/order integration is
+not an operator-alert transport.
+
+The target ownership is now approved but not implemented or production-verified:
+
+- `WARNING` and recovery from warning: email `support@theanimalalchemist.com`, owned by Dexter;
+- `ROLLBACK_REQUIRED`: email `support@theanimalalchemist.com` and
+  `meg@theanimalalchemist.com`, owned by Dexter and escalation operator Meg;
+- critical fallback: Amazon SNS SMS, independently attempted from email delivery.
+
+No SMS destination may be stored in repository files, documentation, logs or project memory. No
+SNS destination/topic, SES capability, WorkMail sending capability, IAM principal, alert outbox,
+delivery worker, migration, credential, external test notification or production configuration has
+yet been verified or created. The next implementation step must first inspect the actual AWS
+capabilities and establish the approved secure secret/destination provisioning boundary. A generic
+unauthenticated webhook must not be invented merely to close this blocker.
+
+### 2. Operator Runbook
 
 The authoritative paid-incident, refund/manual-fulfilment, reconciliation, rollback and escalation
 runbook remains open. It must identify operational ownership, access, alert response and rollback
@@ -147,9 +171,10 @@ steps without recording credentials.
 
 The lifecycle monitoring/rollback-threshold blocker is closed. Database monitoring deliberately
 does not claim an HTTP checkout error-rate because no accurate request denominator is persisted.
-Remaining readiness gates are the authoritative operator/incident runbook, external log/alert
-routing, human readiness review, and separate explicit global-enable authorisation. Global
-reservation enablement remains blocked until those gates are completed and reviewed.
+Remaining readiness gates are authenticated external log/alert routing with an independent critical
+fallback, the authoritative operator/incident runbook, human readiness review, and separate
+explicit global-enable authorisation. Global reservation enablement remains blocked until those
+gates are completed and reviewed.
 
 ## Current Architecture
 
@@ -193,7 +218,9 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 
 ## Exact Next Action
 
-Perform a final read-only review of the two local monitoring provenance commits and push only under
-separate explicit authorisation. Then complete the authoritative operator/incident runbook,
-external alert/log routing, and human readiness review before a separate global-enable decision.
-Global reservations remain off.
+From a clean synchronized Git preflight, inspect the actual AWS account/region capabilities for
+approved programmatic email and Amazon SNS without exposing credentials or any SMS destination.
+Then implement and independently production-verify the bounded durable alert outbox/delivery layer
+against the approved recipients and fallback. Complete the authoritative operator/incident runbook
+and human readiness review afterward, and require a separate global-enable decision. Global
+reservations remain off.
