@@ -51,8 +51,8 @@ Before enabling it in production:
 2. Provision a high-entropy `CHECKOUT_RECONCILIATION_SECRET` independently in each environment.
 3. Configure external monitoring for open `checkout_lifecycle_incidents`, especially every
    `paid_*` incident.
-4. Verify the reconciliation worker manually, then activate a one-to-two-minute production
-   schedule. No schedule is created by the repository migration.
+4. Verify the reconciliation worker manually, then deploy and verify the dedicated one-to-two-minute
+   production scheduler migration.
 5. Confirm the worker can retrieve, expire, list, and recover Checkout Sessions with bounded
    pagination.
 6. Establish an operator runbook for refunding or manually fulfilling paid incidents.
@@ -62,6 +62,20 @@ Before enabling it in production:
    stage before enabling new reservation attempts.
 9. Keep the retired `get-order-confirmation` endpoint absent and verify that only the
    capability-authorized replacement serves order confirmation PII.
+
+Current scheduler status (2026-08-19): additive migration
+`20260824120300_checkout_reconciliation_scheduler.sql` is deployed. The production job
+`taa-checkout-reconciliation-v1` is active every minute and invokes the reconciler through `pg_net`
+using the Vault credential name `taa_checkout_reconciliation_secret`; neither migration SQL nor
+cron metadata contains the credential. `cron.job_run_details` supplies scheduler-fire evidence and
+the private scheduler ledger supplies validated worker-completion evidence. Three consecutive
+scheduled empty-queue executions completed at `13:04`, `13:05`, and `13:06Z` with HTTP 200,
+`claimed = 0`, zero terminalized empty attempts, no lifecycle mutation, and no worker failure. The
+provisional stale-worker threshold is five minutes at the one-minute cadence. Rollback resolves the
+exact named job and calls `cron.alter_job(jobid, active := false)` while retaining the reconciler,
+webhook lifecycle and Vault credential. The scheduler/heartbeat blocker is closed; alert routing,
+objective rollback thresholds and the operator runbook remain open. Global reservations remain
+off.
 
 The historical `legacy/webflow/order-confirmation.js` reference is not a deployable function or an
 approved production path. `get-order-confirmation` must never be restored as part of rollback. Only
@@ -105,8 +119,9 @@ Slice 7C1 exposes no Notify action and makes no notification or delivery promise
 
 The reconciler now invokes bounded service-only cleanup for expired active reservation-v1 attempts
 that provably have no intent, reservation, live pointer, or active admission. It retains those rows
-as `expired` audit history. The reconciler remains unscheduled until the existing production
-activation runbook is completed.
+as `expired` audit history. The reconciler is scheduled by the active production job documented
+above; global reservation enablement remains blocked on monitoring thresholds and the operator
+runbook.
 
 ## Klaviyo delivery after webhook replay
 
