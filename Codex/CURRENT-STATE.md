@@ -19,7 +19,7 @@ have been corrected, focused production re-verification is complete, and the man
 reconciliation scheduler plus dual-layer heartbeat are production-active. The database-native
 lifecycle monitor and explicit rollback thresholds are also production-active and verified. The
 remaining global-enable readiness work is an authenticated external alert route with an independent
-critical fallback, four bounded human-readiness actions, and an explicit launch decision—not another
+critical fallback, three bounded human-readiness actions, and an explicit launch decision—not another
 repetition of already-closed payment or recovery scenarios. The authoritative operator/incident
 runbook is committed and has passed source-consistency, security, focused validation and tabletop
 review. A human-access review now records where primary and failsafe operation is and is not proven.
@@ -184,33 +184,54 @@ monitor reason codes, feature and scheduler rollback, paid incident handling, ex
 recovery, monitoring failure, incident recording, strict re-enablement and the launch watch. Its
 eight-scenario lifecycle tabletop and final documentation review passed.
 
-The subsequent read-only human-access review classified readiness as **READY AFTER FOUR ACTIONS**.
-Dexter currently has usable GitHub administration, linked Supabase project/database and secret
-metadata access, production-proven Edge-secret mutation history, and AWS SES/SNS management access.
-The runbook is committed in a publicly readable Git repository and does not depend on Codex or chat
-history. However:
+The human-access review is now **READY AFTER THREE HUMAN ACTION STREAMS** following a fresh read-only
+AWS follow-up. Dexter currently has usable GitHub administration, linked Supabase project/database
+and secret metadata access, production-proven Edge-secret mutation history, and AWS SES/SNS
+management access. The runbook is committed in a publicly readable Git repository and does not
+depend on Codex or chat history.
+
+AWS console authentication is hardware-FIDO protected for IAM user `Brad`; root MFA is enabled and
+root access keys are absent. The live IAM audit found all non-Brad keys with no current legitimate
+use inactive and only one explained active credential: Brad's approximately 1,382-day-old key
+temporarily enabled for that audit. Dexter disabled that final audit key after evidence collection,
+and the configured local CLI now fails authentication as expected. No post-deactivation IAM
+inventory was claimed because that expected failure removed read access. Brad still inherits
+`AdministratorAccess` through `APEX1.0` with no permissions boundary; narrower privilege,
+temporary/federated access and IAM rationalisation are post-launch hardening for the proportionate
+TAA launch model unless they become dependencies of the checkout alert path.
+
+The three remaining human action streams are:
 
 1. Meg has no verified one-way rollback control; Model B is required because escalation-only Model A
    cannot meet the five-minute SLA when Dexter is unreachable;
-2. current AWS human access does not meet the required MFA/least-privilege/temporary-credential and
-   recoverable break-glass standard;
-3. no authoritative two-human password-manager/account-recovery route independent of Dexter's Mac
+2. no authoritative two-human password-manager/account-recovery route independent of Dexter's Mac
    or primary MFA device is evidenced;
-4. Dexter's named Stripe live/test access, MFA, account recovery, refund/manual-fulfilment authority
+3. Dexter's named Stripe live/test access, MFA, account recovery, refund/manual-fulfilment authority
    and non-mutating paid-incident lookup procedure remain unverified.
+
+For the proportionate TAA launch model, AWS does not require IAM Identity Center as an architectural
+precondition. The launch-critical AWS requirement is that Brad's long-lived key is inactive outside
+explicitly bounded operator work and that external alert delivery does not depend on a broad human
+credential. Replacing `AdministratorAccess` with bounded roles or temporary/federated access,
+deleting reviewed inactive credentials, and retiring legacy `APEX1.0`/`apex-ses` identities remain
+recommended post-launch hardening unless their ownership or use becomes part of the checkout alert
+path.
 
 Model B must expose only an authenticated, audited, idempotent removal of
 `CHECKOUT_RESERVATIONS_ENABLED`; it must never give Meg general Supabase, database, AWS, Stripe,
 scheduler, deployment, or secret-read access. The six human-failover tabletops passed only when
 Dexter and his current Mac were available or when the runbook alone was the dependency. Meg
-unreachable-primary, alternate-device and credential-recovery scenarios remain blocked until the
-four actions are implemented and tested.
+unreachable-primary, alternate-device and credential-recovery scenarios remain blocked. Human
+readiness still requires Model B, tested two-human recovery and Stripe operational authority. The
+launch-critical AWS human-key condition is satisfied while Brad's long-lived key remains inactive;
+external alert delivery must use a purpose-specific credential rather than that broad human key.
 
 The lifecycle monitoring/rollback-threshold blocker is closed. Database monitoring deliberately
 does not claim an HTTP checkout error-rate because no accurate request denominator is persisted.
 Remaining readiness gates are authenticated external log/alert routing with an independent critical
-fallback, the four human-readiness actions above, and separate explicit global-enable authorisation.
-Global reservation enablement remains blocked until those gates are completed and reviewed.
+fallback; Model B and tested two-human recovery; Stripe operational authority; and separate explicit
+global-enable authorisation. Global reservation enablement remains blocked until those gates are
+completed and reviewed.
 
 ## Separate Security Follow-up
 
@@ -263,11 +284,10 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 
 ## Exact Next Action
 
-Perform a final read-only review of the two local human-readiness provenance commits, then fetch and
-push only under separate authorization if the remote guard passes. After provenance is synchronized,
-close the four human-readiness actions: build and drill Meg's one-way Model B rollback control;
-harden/recover AWS human access; establish tested two-human account recovery independent of Dexter's
-Mac; and verify Dexter's named Stripe live/test incident access plus refund/manual-fulfilment
-authority. In parallel, wait for SNS SMS production access before implementing and
-production-verifying external alert delivery. Require a separate global-enable decision after every
-gate closes. Global reservations remain off.
+Review the AWS credential-hardening evidence commit, then push only under separate authorization.
+Next, build and drill Meg's one-way Model B rollback control; establish tested two-human account
+recovery; verify Dexter's Stripe incident/refund/fulfilment authority; and complete SNS-backed
+external alert delivery using purpose-specific credentials. Treat narrower AWS
+privilege/federation and deletion of reviewed inactive identities as post-launch hardening unless a
+broad credential is proposed for the alert path. Require a separate global-enable decision after
+every launch gate closes. Global reservations remain off.

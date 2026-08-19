@@ -53,6 +53,66 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-19 — AWS FIDO and Unused-Credential Cleanup Verification
+
+**Record type:** READ-ONLY AWS IAM CREDENTIAL, MFA AND PERMISSION INVENTORY
+**Evidence grade:** CURRENT AWS IAM METADATA BEFORE FINAL KEY DEACTIVATION; EXPECTED LOCAL AUTH
+FAILURE AFTER OPERATOR DEACTIVATION
+**Status:** CONSOLE/ROOT HARDENED; UNUSED KEYS INACTIVE; LOCAL AUDIT KEY EXPECTEDLY DISABLED
+
+The audit authenticated directly as IAM user `Brad`, generated and read a sanitized IAM credential
+report, and independently queried login, MFA, access-key, last-use, group, policy, permissions-boundary
+and root-account summary metadata. It did not expose access-key IDs, MFA serials, credential values,
+tokens, phone numbers or private destinations. No AWS, Supabase, checkout or production mutation was
+performed by the audit.
+
+Current human/root evidence:
+
+- Brad has a console login profile and one registered FIDO security key, enabled on
+  `2026-08-19T18:26:24Z`. This verifies the hardware-FIDO registration; identification of the
+  physical device as Dexter's Trezor is operator-attested;
+- root MFA is enabled and root access keys are absent;
+- during the authenticated live inventory, Brad had exactly one active and zero inactive access
+  keys. The active key was approximately 1,382 days old, was the configured key used for this
+  read-only audit, and had current IAM activity. The historical second Brad key was absent;
+- Brad remains the sole member of `APEX1.0`, inherits `AdministratorAccess`, and has no permissions
+  boundary.
+
+The operator's unused-key cleanup is verified:
+
+- `apex-ses`: zero active, one inactive key; approximately 2,312 days old, last used for SES in
+  `eu-west-2` on `2021-08-19`;
+- `info`: zero active, one inactive key; approximately 1,451 days old, last used for SES SMTP in
+  `eu-west-1` on `2026-05-05`;
+- `ses-smtp-user.20230604-140541`: zero active, one inactive key; approximately 1,172 days old with
+  no recorded use;
+- `theanimalalchemist`: zero active, one inactive key; approximately 923 days old with no recorded
+  use.
+
+No unexplained active credential remained at the end of the authenticated inventory: the only
+active key was the explained temporary Brad audit key. After evidence collection, Dexter disabled
+that key manually. A subsequent `aws sts get-caller-identity` call failed with the expected
+inactive/invalid-credential result, proving that the configured local credential can no longer
+authenticate. No replacement credential was created or requested. Because that expected failure
+removed read access, this record does not claim a post-deactivation live IAM inventory; it combines
+the preceding sanitized inventory, Dexter's deactivation statement and the failed local STS check.
+
+The inactive users and keys must not be deleted merely from name or age; ownership should be
+reviewed separately. `apex-ses` and `APEX1.0` are strong legacy-APEX candidates, while the other
+scoped SES identities require current TAA ownership classification.
+
+For the small TAA operating model, hardware-FIDO console access, root MFA/no root keys, inactive
+unused service credentials, and keeping Brad's CLI key disabled outside bounded work are a
+proportionate launch posture. The expected failed STS check closes the launch-critical human-key
+condition while that credential remains disabled. IAM Identity Center is not itself a checkout
+launch requirement. External alert delivery must not reuse Brad's broad human key. Removing
+`AdministratorAccess`, adopting bounded temporary/federated operator access, deleting reviewed
+inactive credentials and retiring legacy APEX identities remain recommended post-launch hardening
+unless a concrete checkout or alert dependency makes them launch-critical. Human
+recovery/break-glass, external alert delivery, Meg's Model B rollback control, Stripe operational
+authority and separate global-enable approval remain open. Global reservations remain OFF according
+to the latest authoritative recorded state.
+
 ## 2026-08-19 — Checkout Human Operational-Readiness and Access Review
 
 **Record type:** READ-ONLY HUMAN ACCESS, RECOVERY AND DOCUMENTATION TABLETOP
