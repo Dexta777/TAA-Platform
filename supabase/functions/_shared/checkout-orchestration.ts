@@ -8,15 +8,26 @@ export function getRpcResultRow<T>(data: T | T[] | null): T | null {
 }
 
 export class CheckoutDatabaseError extends Error {
+  rpcName: string;
   code: string | null;
   details: string | null;
 
-  constructor(message: string, code: unknown, details: unknown) {
+  constructor(message: string, code: unknown, details: unknown, rpcName: string) {
     super(message);
     this.name = 'CheckoutDatabaseError';
+    this.rpcName = rpcName;
     this.code = typeof code === 'string' ? code : null;
     this.details = typeof details === 'string' ? details : null;
   }
+}
+
+export function getCheckoutDatabaseErrorDiagnostic(error: unknown) {
+  if (!(error instanceof CheckoutDatabaseError)) return null;
+
+  return {
+    rpc_name: error.rpcName,
+    database_error_code: error.code || 'unknown',
+  };
 }
 
 export async function callCheckoutRpc<T>(
@@ -30,7 +41,8 @@ export async function callCheckoutRpc<T>(
     throw new CheckoutDatabaseError(
       error.message || `Checkout RPC ${functionName} failed.`,
       error.code,
-      error.details
+      error.details,
+      functionName
     );
   }
 

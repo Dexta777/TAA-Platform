@@ -6,7 +6,10 @@ import {
   checkoutSessionMatchesAttempt,
   getCheckoutAbandonmentAction,
 } from '../_shared/checkout-abandonment.ts';
-import { callCheckoutRpc } from '../_shared/checkout-orchestration.ts';
+import {
+  callCheckoutRpc,
+  getCheckoutDatabaseErrorDiagnostic,
+} from '../_shared/checkout-orchestration.ts';
 import { normalizeUuid } from '../_shared/checkout-protocol.ts';
 import {
   browserErrorResponse,
@@ -254,9 +257,14 @@ serve(async (request) => {
       return jsonResponse(securityContext, { error: error.message }, 503);
     }
 
-    console.error('ABANDON CHECKOUT ATTEMPT ERROR:', {
-      error_name: error instanceof Error ? error.name : 'unknown',
-    });
+    const databaseDiagnostic = getCheckoutDatabaseErrorDiagnostic(error);
+
+    console.error(
+      'ABANDON CHECKOUT ATTEMPT ERROR:',
+      databaseDiagnostic || {
+        error_name: error instanceof Error ? error.name : 'unknown',
+      }
+    );
 
     return securityContext
       ? jsonResponse(
