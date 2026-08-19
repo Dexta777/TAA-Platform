@@ -53,6 +53,199 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-19 — Reconciliation Scheduler Runtime Provenance Commit Created, Not Pushed
+
+**Record type:** CONTEMPORANEOUS SOURCE-CONTROL, FOCUSED TEST AND READ-ONLY PRODUCTION PARITY EVIDENCE
+**Evidence grade:** LOCAL COMMIT PROVENANCE FOR ALREADY-DEPLOYED PRODUCTION INFRASTRUCTURE
+**Status:** RUNTIME COMMIT CREATED; NO PUSH OR PRODUCTION MUTATION
+
+Starting from `e6eb75fb8500ed853dc1f326edb9af1a1fb15706`, the complete scheduler migration,
+focused pgTAP regression and checkout production-blocker diff were reviewed as one operational
+boundary. Migration `20260824120300_checkout_reconciliation_scheduler.sql` contains the exact job
+name `taa-checkout-reconciliation-v1`, one-minute `* * * * *` cadence, runtime Vault lookup by
+`taa_checkout_reconciliation_secret`, unresolved-request non-overlap fencing, a private RLS-enabled
+heartbeat ledger, browser-role revocations and named-job `cron.alter_job(jobid, active := false)`
+rollback. It contains no credential value or checkout/inventory mutation.
+
+The migration and test were unchanged after the recorded 20-migration replay, `28/28` focused
+pgTAP, `504/504` full database suite, database lint, `17/17` reconciliation/auth Deno suite,
+reconciler typecheck and production activation checkpoint. The permitted focused verification was
+therefore run against the unchanged candidate:
+
+- scheduler pgTAP: `28/28` PASS;
+- local database lint across `extensions`, `private` and `public`: PASS with no schema errors;
+- targeted Markdown Prettier check: PASS;
+- sensitive credential-pattern scan across all five scheduler/evidence paths: PASS;
+- `git diff --check` and staged diff check: PASS.
+
+A read-only production parity query at `2026-08-19T13:13:16.828985Z` confirmed migration version
+`20260824120300` once, one active named job at the exact cadence and command, no authentication
+material in cron metadata, deployed Vault-name lookup and null-body semantics, `SECURITY DEFINER`,
+hardened empty search path, private-ledger RLS, and no `anon` or `authenticated` execution access.
+The latest scheduler fire was `13:13:00.045618Z`, the latest completed worker heartbeat was
+`13:12:00.020381Z`, and recorded worker failures remained `0`. This was observation only: no manual
+reconciliation, scheduler change, Vault change, deployment, feature-flag change or production
+mutation occurred.
+
+Commit `762b3116dc76961dc32497b890369a8e951ff543`, titled
+`feat: schedule checkout reconciliation`, contains exactly:
+
+- `supabase/migrations/20260824120300_checkout_reconciliation_scheduler.sql`;
+- `supabase/tests/database/checkout-reconciliation-scheduler.test.sql`;
+- `docs/checkout-production-blockers.md` scheduler operational-contract updates.
+
+Project memory remains a separate evidence boundary. No push was performed. Global reservations
+remain OFF, and monitoring/rollback thresholds plus the operator runbook remain the global-enable
+blockers.
+
+## 2026-08-19 — Production Reconciliation Scheduler and Heartbeat Activated
+
+**Record type:** CONTEMPORANEOUS DEPLOYMENT, RUNTIME AND PRODUCTION EVIDENCE
+**Evidence grade:** PRODUCTION SCHEDULED EXECUTION AND DUAL-LAYER HEARTBEAT VERIFIED
+**Status:** PASS; MANDATORY SCHEDULER/HEARTBEAT BLOCKER CLOSED
+
+The bounded activation began from synchronized `main` and `origin/main` at
+`e6eb75fb8500ed853dc1f326edb9af1a1fb15706`, with nothing staged and only the reviewed scheduler,
+test and project-documentation paths dirty. `CHECKOUT_RECONCILIATION_SECRET` was confirmed present
+and non-empty by presence only. Edge secret metadata showed the current reconciliation credential
+and canary allowlist present, while `CHECKOUT_RECONCILIATION_PREVIOUS_SECRET` and
+`CHECKOUT_RESERVATIONS_ENABLED` were absent.
+
+The production preflight at `2026-08-19T13:00:48.320418Z` proved A `4/0/4`, BASE `1/0/1`, and C
+`4/0/4`; active reservation-v1 attempts `0`, active intents `0`, active admissions `0`, held
+reservations `0`, due reservations `0`, open incidents `0`, and open reconciliation jobs `0`.
+Vault contained `taa_supabase_functions_url` by metadata/name only and did not contain
+`taa_checkout_reconciliation_secret`; `pg_cron`, the named job and migration `20260824120300` were
+absent. The linked dry run contained only
+`20260824120300_checkout_reconciliation_scheduler.sql`, with no seed or role changes.
+
+Explicit operator authorization was then used to copy the existing current reconciliation
+credential into production Vault under the exact name `taa_checkout_reconciliation_secret`. The
+first shell construction failed to parse before any command executed. The corrected operation used
+a permission-restricted named pipe, passed no credential in argv, suppressed database command
+output, removed the pipe immediately, and returned only a safe completion classification. A
+read-only query proved the Vault name and metadata at `2026-08-19T13:01:59.813257Z`; no plaintext
+credential was printed, hashed, logged, serialized or persisted outside Vault. The existing Edge
+secret was not altered or rotated.
+
+A second linked dry run again listed only the intended migration. The production database then
+applied `20260824120300_checkout_reconciliation_scheduler.sql` successfully. Production history
+contains version `20260824120300` exactly once. Deployed extensions are `pg_cron` `1.6.4`, `pg_net`
+`0.20.0`, and Supabase Vault `0.3.1`. Exactly one job named
+`taa-checkout-reconciliation-v1` is active at `* * * * *`, owned by `postgres`, and its cron command
+is only `SELECT private.run_checkout_reconciliation_scheduler_v1();`. The command contains no
+authentication material.
+
+The deployed scheduler function is `postgres`-owned, `SECURITY DEFINER`, has an empty hardened
+search path, performs both named Vault lookups, and sends a SQL `NULL` JSON body to the deployed
+empty-body batch endpoint. Only `postgres` can execute it. RLS is enabled on the private heartbeat
+ledger; `anon`, `authenticated`, and `service_role` cannot select it, and browser roles cannot use
+the `private` or `cron` schemas.
+
+Three consecutive real cron-generated worker cycles completed successfully without manual
+reconciler invocation:
+
+- scheduler fire `2026-08-19T13:04:00.117189Z`, worker completion
+  `2026-08-19T13:04:00.123072Z`: HTTP 200, `empty_queue`, `claimed = 0`, terminalized empty attempts
+  `0`;
+- scheduler fire `2026-08-19T13:05:00.055322Z`, worker completion
+  `2026-08-19T13:05:00.056912Z`: HTTP 200, `empty_queue`, `claimed = 0`, terminalized empty attempts
+  `0`;
+- scheduler fire `2026-08-19T13:06:00.022351Z`, worker completion
+  `2026-08-19T13:06:00.023140Z`: HTTP 200, `empty_queue`, `claimed = 0`, terminalized empty attempts
+  `0`.
+
+`cron.job_run_details` recorded successful scheduler executions at `13:04`, `13:05`, `13:06`, and
+`13:07Z`. At the final `2026-08-19T13:07:36.798704Z` checkpoint, the latest scheduler heartbeat was
+37 seconds old and the latest validated worker completion was 97 seconds old; the durable ledger
+contained three successful empty-queue completions and zero failed workers. HTTP 200 plus the
+validated bounded response contract proves the endpoint was reached and authenticated; cron firing
+alone was not treated as worker success.
+
+The final production baseline remained A `4/0/4`, BASE `1/0/1`, C `4/0/4`, with active attempts,
+active intents, active admissions, held reservations, due reservations, open incidents and open
+jobs all `0`. `CHECKOUT_RESERVATIONS_ENABLED` remained absent, so global reservations remained OFF.
+
+Failure visibility is split deliberately: `cron.job_run_details` shows scheduler execution, while
+`private.checkout_reconciliation_scheduler_runs` records queueing, non-overlap, transport/HTTP or
+response-contract failure, and validated worker completion. The provisional stale threshold
+remains five minutes, equal to five missed one-minute completion heartbeats. Full alert routing is
+still open. Scheduler-only rollback is to resolve the exact named job ID and call
+`cron.alter_job(jobid, active := false)`; local pgTAP already proved deactivate/reactivate behavior
+without deleting the reconciler, Vault credential, Stripe webhooks, or reservation lifecycle. The
+production job was not disabled during verification and remains active.
+
+## 2026-08-19 — Reconciliation Scheduler and Heartbeat Implemented Locally; Production Blocked Before Mutation
+
+**Record type:** CONTEMPORANEOUS SOURCE, LOCAL TEST AND READ-ONLY PRODUCTION PREFLIGHT EVIDENCE
+**Evidence grade:** LOCAL DATABASE/PROTOCOL VERIFICATION; PRODUCTION UNCHANGED
+**Status:** LOCAL FIX READY; VAULT PROVISIONING REQUIRES EXPLICIT APPROVAL
+
+The task began with clean synchronized `main` and `origin/main` at
+`e6eb75fb8500ed853dc1f326edb9af1a1fb15706`, ahead/behind `0/0`, nothing staged and no dirty paths.
+Read-only production inspection proved `pg_net` `0.20.0` and Supabase Vault `0.3.1` available,
+`pg_cron` absent, `cron.job` absent, and the Vault origin secret `taa_supabase_functions_url`
+present by name. Edge secret metadata showed `CHECKOUT_RECONCILIATION_SECRET` and
+`CHECKOUT_RESERVATIONS_CANARY_SKUS` configured, with
+`CHECKOUT_RECONCILIATION_PREVIOUS_SECRET` and `CHECKOUT_RESERVATIONS_ENABLED` absent. The inherited
+current reconciliation credential was confirmed present and non-empty by presence only; its value
+was never printed, hashed, serialized, persisted or logged.
+
+The production lifecycle preflight at `2026-08-19T12:44:28.071962Z` returned A `4/0/4`, BASE
+`1/0/1`, C `4/0/4`; active reservation-v1 attempts `0`, active intents `0`, active admissions `0`,
+held reservations `0`, due reservations `0`, open incidents `0`, and open jobs `0`. Recorded
+reservation-v1 Sessions remained test-only. The linked migration dry-run listed exactly
+`20260824120300_checkout_reconciliation_scheduler.sql`, with no seeds or roles.
+
+The selected architecture is one database-side `pg_cron` job named
+`taa-checkout-reconciliation-v1` at `* * * * *`. It calls only
+`private.run_checkout_reconciliation_scheduler_v1()`. That function reads the existing functions
+origin and scheduler copy of the reconciliation credential from Vault, queues an authenticated
+`pg_net` POST with a SQL `NULL` JSON body so the deployed handler receives the required truly empty
+batch body, and persists credential-free run evidence in
+`private.checkout_reconciliation_scheduler_runs`. Each cycle first harvests the prior
+`net._http_response`: a validated HTTP 200 response with bounded integer counters becomes the worker
+completion heartbeat; HTTP, transport and invalid-response outcomes remain durably visible.
+Unresolved requests suppress another HTTP invocation while still recording the scheduler cycle.
+The provisional stale-worker threshold is five minutes, derived as five missed cycles at the
+one-minute cadence. Full alerting remains out of scope. The reviewed rollback is
+`cron.alter_job(jobid, active := false)` for the exact named job; pgTAP proved deactivate and
+reactivate behavior inside the test transaction without deleting the reconciler or credential.
+
+Migration `20260824120300_checkout_reconciliation_scheduler.sql` creates only this scheduler
+infrastructure, private ledger and one named job. It stores no credential, performs no checkout or
+inventory mutation, and grants the scheduler function only to `postgres`. The private schema and
+heartbeat table remain inaccessible to browser roles. The focused 28-assertion pgTAP regression
+proves the job name/cadence/command, no secret-bearing cron metadata, private privileges,
+`SECURITY DEFINER` and empty search path, transaction-safe deactivate/reactivate rollback, missing
+Vault failure visibility, the exact authenticated null-body queue entry, non-overlap behavior and
+durable empty-queue completion harvesting.
+
+Current working-tree verification passed:
+
+- clean replay of 20 migrations: PASS;
+- focused scheduler pgTAP: `28/28` PASS after correcting two catalogue assertions found by the
+  initial run;
+- complete database suite: `504/504` PASS;
+- database lint across `extensions`, `private` and `public`: PASS;
+- focused reconciliation/operator-recovery/internal-auth Deno tests: `17/17` PASS;
+- `reconcile-checkout-reservations` entrypoint typecheck: PASS;
+- targeted Prettier and `git diff --check`: PASS.
+
+The secure production Vault write was then requested through a permission-restricted,
+non-persistent FIFO. The execution approval boundary rejected the credential copy before the shell
+command ran because explicit approval of the exact destination was required. No workaround was
+attempted. A fresh read at `2026-08-19T12:45:42.986912Z` proved the Vault name
+`taa_checkout_reconciliation_secret` absent, migration `20260824120300` absent and `cron.job`
+absent. Therefore no production mutation, scheduler execution or reconciler invocation occurred.
+
+The exact resume action is explicit authorization to copy the existing
+`CHECKOUT_RECONCILIATION_SECRET` into production Supabase Vault under
+`taa_checkout_reconciliation_secret`. After authorization, repeat the live zero-active gate,
+provision through the reviewed non-persistent operator path, apply only the reviewed migration and
+observe at least three consecutive scheduled empty-queue worker completions. Global reservations
+remain OFF.
+
 ## 2026-08-19 — Deliberate Working-Tree Provenance Cleanup
 
 **Record type:** CONTEMPORANEOUS SOURCE-CONTROL, TEST AND TOOLING EVIDENCE
