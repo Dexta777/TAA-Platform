@@ -1,11 +1,13 @@
 # TAA-Platform Engineering Handbook (AGENTS.md)
 
-> Version: 1.0
+> Version: 1.1
 > Status: Active Engineering Standard
 
 ## Mission
 
 TAA-Platform is the custom application layer extending The Animal Alchemist beyond Webflow's native capabilities.
+
+The platform should remain understandable, maintainable, secure, testable and evolvable regardless of which human contributor or AI model is working on it.
 
 ## Core Principles
 
@@ -16,6 +18,9 @@ TAA-Platform is the custom application layer extending The Animal Alchemist beyo
 5. Performance matters.
 6. Accessibility is mandatory.
 7. Simplicity over cleverness.
+8. Prefer verified evidence over assumption.
+9. Preserve architectural knowledge independently of implementation.
+10. Do not allow model limitations, memory boundaries or tooling differences to weaken engineering discipline.
 
 ## Technology Stack
 
@@ -62,11 +67,13 @@ Bootstrap and configuration.
 
 ### modules
 
-Business features.
+Business features and application behaviour.
 
 ### services
 
 External integrations only.
+
+Services must not become the owner of domain/business rules that belong in modules or server-side domain logic.
 
 ### ui
 
@@ -76,19 +83,28 @@ Reusable UI components.
 
 Shared helpers.
 
+Do not create generic utilities merely to fill architectural placeholders.
+
+Prefer narrowly scoped helpers with clear ownership and purpose.
+
 ### styles
 
-Global CSS.
+Global application CSS and shared application tokens.
+
+Webflow remains responsible for primary layout and presentation where appropriate.
 
 ## JavaScript Standards
 
 - ES Modules
-- const by default
-- async/await
+- `const` by default
+- `async` / `await`
 - early returns
 - descriptive names
 - no globals
 - no inline event handlers
+- prefer explicit state transitions over implicit mutation
+- keep side effects close to their owning boundary
+- avoid hidden coupling between modules
 
 ## Naming
 
@@ -97,6 +113,8 @@ Files use kebab-case.
 Variables use camelCase.
 
 Constants use UPPER_SNAKE_CASE.
+
+Names should describe responsibility rather than implementation detail where practical.
 
 ## Webflow Contract
 
@@ -108,19 +126,31 @@ Example:
 <button data-action="add-to-cart"></button>
 ```
 
+Webflow classes may change for styling reasons and must not become application contracts.
+
+Application behaviour should use stable `data-*` attributes.
+
 ## Supabase
 
-Responsible for authentication, profiles, orders and course data.
+Supabase is responsible for application data, authentication, profiles, orders, course data, database logic and Edge Functions where applicable.
 
-Always use Row Level Security.
+Always use Row Level Security where appropriate.
 
-Never expose service-role keys.
+Never expose service-role keys to the browser.
+
+Browser-facing credentials must remain publishable/public credentials only.
+
+Security-sensitive business rules must not rely solely on browser enforcement.
 
 ## Stripe
 
 Stripe is the payment source of truth.
 
 Never store card details.
+
+Payment completion must be determined using authoritative Stripe/server-side evidence rather than trusting browser state alone.
+
+Client-side checkout state must not be treated as proof of payment.
 
 ## Storage
 
@@ -130,23 +160,52 @@ Current cart key:
 taa_cart
 ```
 
-Only store non-sensitive data.
+Only store non-sensitive data in browser storage.
+
+Storage ownership must be explicit.
+
+Use browser persistence mechanisms according to their intended lifecycle.
+
+Examples:
+
+- `localStorage` for durable non-sensitive browser state
+- `sessionStorage` for session-scoped state
+- server/database state for authoritative shared state
+
+Do not place secrets, payment details, privileged tokens or sensitive personal data into browser storage.
 
 ## Error Handling
 
-- Clear user messages
-- Useful console diagnostics
-- Never expose secrets
+- clear user messages
+- useful console diagnostics
+- never expose secrets
+- fail safely
+- preserve actionable diagnostic information
+- distinguish user-correctable failures from internal/system failures
+- do not silently swallow state-transition failures
+- do not present inferred causes as verified causes
 
 ## Accessibility
 
-Support keyboard navigation, semantic HTML and focus management.
+Support:
+
+- keyboard navigation
+- semantic HTML
+- focus management
+- meaningful labels
+- appropriate ARIA usage
+- accessible asynchronous state changes
+- clear error and status communication
+
+Accessibility requirements are architectural requirements, not final-stage polish.
 
 ## CSS
 
-Use Webflow for layout.
+Use Webflow for primary layout and presentation.
 
-Repository CSS manages application behaviour and shared tokens.
+Repository CSS manages application behaviour, state styling and shared application tokens where necessary.
+
+Do not duplicate styling responsibilities between Webflow and repository CSS without a deliberate reason.
 
 ## Performance
 
@@ -154,31 +213,603 @@ Initialise only required modules.
 
 Bundle through Vite.
 
+Prefer conditional/lazy loading for page-specific behaviour.
+
+Avoid loading large dependencies or modules globally when only one application surface requires them.
+
+Measure performance-sensitive decisions rather than assuming optimisation.
+
 ## Security
 
 Never commit:
 
-- .env
+- `.env`
 - API keys
 - secret tokens
+- service-role credentials
+- private signing secrets
+- sensitive customer data
+
+Treat all browser input as untrusted.
+
+Treat all client-generated identifiers and state as untrusted unless validated server-side.
+
+Security-sensitive changes require stronger evidence and review than ordinary UI changes.
 
 ## Git Workflow
+
+Before committing:
 
 ```bash
 npm run check
 git status
-git add .
+git diff
+```
+
+Then stage intentionally:
+
+```bash
+git add <intended-files>
+git status
+```
+
+Commit with a meaningful message:
+
+```bash
 git commit -m "Describe the change"
 git push
 ```
 
+Do not use `git add .` blindly when unrelated or unverified working-tree changes may exist.
+
+Do not assume `HEAD` represents the entire operational state of the project.
+
+Always inspect the working tree before making claims about what is current.
+
 ## AI Contributor Rules
 
-Maintain the architecture.
+All AI contributors must follow the same engineering standard regardless of model, provider or execution environment.
 
-Avoid unnecessary dependencies.
+This includes, but is not limited to:
 
-Document significant design decisions.
+- Codex
+- Qwen
+- ChatGPT
+- future local models
+- future hosted models
+- autonomous or semi-autonomous coding agents
+
+AI contributors must:
+
+- maintain the architecture
+- avoid unnecessary dependencies
+- document significant design decisions
+- preserve evidence discipline
+- state uncertainty explicitly
+- inspect relevant source before making implementation claims
+- avoid changing unrelated code
+- avoid speculative refactoring
+- prefer reversible, auditable changes
+- never fabricate test, deployment or runtime results
+
+No AI model is itself an authority on project state.
+
+Project state is established through evidence.
+
+## Temporal Evidence Discipline
+
+Evidence has a time as well as a type.
+
+An agent must distinguish between:
+
+- evidence that existed at the time of a historical event;
+- evidence recovered later about that historical event;
+- new evidence created during the current investigation.
+
+### Historical Reconstruction
+
+When performing a retrospective audit:
+
+- tests executed today are contemporary evidence for today's working state;
+- tests executed today are not evidence that those tests passed historically;
+- current runtime observations are not historical runtime evidence;
+- current source behaviour is not proof of historical source behaviour;
+- current working-tree tests must not be attributed to an earlier Git commit
+  unless that exact revision was checked out and tested;
+- the existence of a historical test file does not establish that it ran;
+- later successful behaviour does not prove an earlier revision behaved the
+  same way.
+
+Evidence created during an audit must never be backdated.
+
+Example:
+
+A test suite introduced on 2026-08-12 and executed successfully on 2026-08-18
+establishes:
+
+> The tested 2026-08-18 working state passed the observed test execution.
+
+It does not establish:
+
+> The 2026-08-12 implementation passed that test on 2026-08-12.
+
+Historical PASS requires independently recoverable historical evidence.
+
+### Revision Attribution
+
+Before attributing test evidence to a Git revision, establish the relationship
+between the executed code and that revision.
+
+If the working tree is dirty:
+
+- report that fact;
+- treat test evidence as applying to the working tree;
+- do not automatically attribute the result to HEAD;
+- do not automatically attribute the result to any earlier commit.
+
+Use terms such as:
+
+- `current working-tree verification`;
+- `verification of commit <hash>`;
+- `deployed release verification`;
+
+precisely.
+
+Do not use them interchangeably.
+
+## Verification Layer Separation
+
+The following are distinct verification layers:
+
+1. unit/module test;
+2. integration test;
+3. browser fixture test;
+4. deployed canary smoke test;
+5. production-path runtime test;
+6. real external integration test.
+
+Passing a lower layer must never be described as passing a higher layer.
+
+In particular:
+
+`node --test checkout-canary-fixture.test.js`
+
+is verification of the canary fixture code.
+
+It is NOT a deployed checkout canary smoke test.
+
+A deployed canary smoke test requires the actual deployed `/checkout-test`
+environment to be exercised with appropriate browser/runtime observation.
+
+## Audit Mutation Discipline
+
+A read-only or retrospective audit should avoid creating new evidence unless
+the task explicitly requires current verification.
+
+Before running tests during a historical audit, ask:
+
+> Am I trying to discover whether this test ran historically, or am I creating
+> new evidence by running it now?
+
+If the goal is historical reconstruction, prefer recovering existing execution
+evidence.
+
+If tests are run anyway:
+
+- classify the result separately as new contemporaneous evidence;
+- record the date;
+- record the working-tree state;
+- never use it to upgrade historical evidence;
+- disclose any tooling/cache mutation caused by execution.
+
+## Task Completion Discipline
+
+When a task defines a concrete deliverable, the task is not complete until that
+deliverable has been produced.
+
+Context compaction, token exhaustion, tool-output pruning, or session recovery
+do not change the original objective.
+
+After compaction:
+
+1. recover the original objective;
+2. recover completed work;
+3. recover the remaining deliverable;
+4. continue toward that deliverable.
+
+Do not substitute:
+
+- a progress summary;
+- a "Next Move" section;
+- "Ready to proceed?";
+- "Want me to continue?";
+- a description of what remains;
+
+for the requested final artifact.
+
+If sufficient evidence exists to complete the task, complete it.
+
+If evidence is genuinely insufficient, produce the best supported partial
+artifact and explicitly identify the unresolved gaps.
+
+## Agent Startup and Project Memory
+
+TAA-Platform maintains model-agnostic project memory so that human contributors and AI agents operate from the same known state.
+
+At the beginning of every substantive engineering session, the contributor or agent must:
+
+1. Read `AGENTS.md`.
+2. Read `Codex/README.md`.
+3. Read `Codex/CURRENT-STATE.md`.
+4. Read `Codex/VERIFICATION-LOG.md`.
+5. Inspect:
+
+```bash
+git status --short
+```
+
+6. Inspect recent Git history.
+7. Read the latest completed Leaf.
+8. Read the current active Leaf, if one exists.
+9. Read relevant Architecture Decision Records.
+10. Read task-relevant authoritative Codex documentation.
+11. Inspect the relevant implementation before making claims or proposing changes.
+
+Do not repeat a whole-repository exploration when project memory and task-specific evidence already provide sufficient context.
+
+### CURRENT-STATE.md
+
+`Codex/CURRENT-STATE.md` is the canonical living description of the project's current known state.
+
+It should capture:
+
+- current primary objective
+- current architectural state
+- recently completed work
+- current deployment/runtime state
+- known constraints
+- active blockers
+- important unresolved risks
+- current architectural debt
+- next logical work
+
+It may be revised as reality changes.
+
+It must not contain speculative conclusions presented as fact.
+
+### VERIFICATION-LOG.md
+
+`Codex/VERIFICATION-LOG.md` is the durable historical evidence register.
+
+It records:
+
+- tests actually executed
+- deployments actually performed
+- canary observations
+- integration verification
+- runtime observations
+- production observations
+- failures as well as successes
+
+Existing verification records should normally remain intact.
+
+Later records may supersede or qualify earlier evidence, but historical evidence must not be silently rewritten.
+
+### Session Handoff
+
+After significant work, update project memory when and only when the known project state has materially changed.
+
+Record:
+
+- work actually completed
+- verification actually performed
+- important architectural or implementation decisions
+- files or systems materially changed
+- unresolved risks or blockers
+- exact logical next steps
+
+Do not claim completion without verification appropriate to the claim.
+
+## Evidence Discipline
+
+Engineering claims must distinguish between different evidence categories.
+
+### Source Evidence
+
+Answers:
+
+> What exists in the implementation?
+
+Possible classifications include:
+
+- absent
+- architectural placeholder
+- partially implemented
+- implemented
+
+Source existence does not establish successful behaviour.
+
+An empty file or empty directory is not an implementation merely because its architectural location exists.
+
+### Test Evidence
+
+Answers:
+
+> What behaviour has actually been exercised by a defined test?
+
+Distinguish between:
+
+- no relevant test found
+- test exists but execution method is unknown
+- test appears runnable
+- test executed and failed
+- test executed and passed
+
+Never infer that a test passed merely because a test file exists.
+
+Never infer that a JavaScript test is unrunnable merely because Jest, Vitest or another external test framework is absent.
+
+Inspect whether Node's built-in `node:test` runner or another execution method is used.
+
+A test file, test command and successful test execution are three separate pieces of evidence.
+
+### Deployment Evidence
+
+Answers:
+
+> What known revision, release, migration or configuration has actually been deployed?
+
+Repository inspection alone may be insufficient to establish deployment state.
+
+Deployment evidence should identify the revision, release, migration set or environment where practical.
+
+### Runtime Evidence
+
+Answers:
+
+> What behaviour has actually been observed in a running environment?
+
+Runtime evidence should identify the environment where possible:
+
+- local
+- local Supabase
+- canary
+- staging
+- production
+
+Deployment does not automatically prove runtime correctness.
+
+### Production Evidence
+
+Production evidence means the relevant behaviour was observed on the actual production path.
+
+Canary verification does not automatically constitute production verification.
+
+### Evidence Rules
+
+All contributors and agents must follow these rules:
+
+1. Never equate "not evidenced in this repository" with "not verified in reality".
+2. Never convert `unknown` into `absent`.
+3. Never convert `implemented` into `tested` without test evidence.
+4. Never convert `tested` into `deployed` without deployment evidence.
+5. Never convert `deployed` into `runtime verified` without observed runtime evidence.
+6. Never convert canary evidence into production evidence unless the production path itself was verified.
+7. Never infer test execution merely because test files exist.
+8. Never infer production readiness from implementation completeness alone.
+9. Identify conflicts between source, Git history, project memory, deployment records and runtime evidence.
+10. State unresolved conflicts explicitly.
+11. Prefer primary/direct evidence over inference.
+12. Never fabricate test, deployment, runtime or production verification.
+13. Record failures as faithfully as successes.
+14. Distinguish lack of evidence from evidence of absence.
+
+When making a material engineering statement or recommendation, distinguish clearly between:
+
+- verified fact
+- repository evidence
+- architectural decision
+- inference
+- recommendation
+- unresolved uncertainty
+
+## Verification Classification
+
+Where useful, subsystems may be described across separate axes rather than with one overloaded maturity label.
+
+Example:
+
+```text
+Implementation: implemented
+Tests: executed and passed
+Deployment: deployed to canary
+Runtime: canary verified
+Production: unknown
+```
+
+Prefer this over ambiguous statements such as:
+
+```text
+fully implemented
+complete
+production-ready
+working
+```
+
+unless the supporting evidence actually justifies them.
+
+## Currentness and Technical Research
+
+Do not assume model training knowledge represents the current state of:
+
+- APIs
+- libraries
+- frameworks
+- cloud services
+- security practices
+- standards
+- browser behaviour
+- SDKs
+- pricing
+- deployment methods
+- vendor recommendations
+- AI models
+- infrastructure tooling
+
+When a recommendation may depend on information that can change:
+
+1. Identify the version actually used by this repository.
+2. Research current primary sources when external access is available and appropriate.
+3. Prefer:
+   - official documentation
+   - official repositories
+   - specifications
+   - release notes
+   - changelogs
+4. Verify dates and versions when they materially affect the answer.
+5. Distinguish current externally verified information from model-training knowledge.
+6. Never claim that a method is "latest", "best", "recommended" or "deprecated" without suitable current evidence.
+7. Compare credible alternatives where relevant.
+8. Preserve project privacy when performing external research.
+
+Do not send proprietary source code, secrets or sensitive project material to external research services unless explicitly required and authorised.
+
+Search queries should contain only the information necessary to obtain the external technical evidence.
+
+## Architectural Placeholder Policy
+
+Empty files and directories are architectural signals, not automatic work orders.
+
+For every placeholder, eventually choose one of:
+
+- implement
+- deliberately defer
+- remove
+
+Do not create implementation merely to make an empty stub non-empty.
+
+Do not leave placeholders indefinitely if their intended responsibility has moved elsewhere.
+
+When implementation begins in an intended domain, establish the correct architectural boundary before allowing business logic to accumulate in unrelated modules.
+
+## Documentation Policy
+
+The Codex exists to preserve architectural reasoning independently of implementation.
+
+Code explains:
+
+> how the system currently works
+
+The Codex should explain:
+
+> why the system is designed that way
+
+Significant architectural knowledge should not exist only inside:
+
+- source code
+- Git commit messages
+- temporary chats
+- AI conversation history
+- individual contributor memory
+
+When implementation materially evolves beyond existing documentation, documentation debt must be acknowledged and resolved deliberately.
+
+Do not bulk-fill empty Codex files with speculative descriptions.
+
+Populate them from verified architecture, implementation evidence and established design decisions.
+
+## Architecture Decision Records
+
+Use Architecture Decision Records for significant decisions that:
+
+- establish architectural ownership
+- constrain future implementations
+- replace an earlier architectural approach
+- affect multiple subsystems
+- introduce important security or reliability trade-offs
+- would otherwise require future contributors to reverse-engineer the reasoning
+
+ADRs should explain:
+
+- context
+- decision
+- rationale
+- alternatives considered
+- consequences
+
+## Context Acquisition
+
+Before making significant changes:
+
+1. Read `AGENTS.md`.
+2. Read `Codex/README.md`.
+3. Read `Codex/CURRENT-STATE.md`.
+4. Read `Codex/VERIFICATION-LOG.md`.
+5. Read the latest completed Leaf.
+6. Read the current active Leaf.
+7. Read linked Architecture Decision Records.
+8. Inspect current Git status.
+9. Inspect the implementation.
+10. Inspect task-relevant tests and verification evidence.
+11. Research current external technical information when necessary.
+
+Do not infer settled architectural intent from code alone when the Codex records the decision.
+
+Do not infer current runtime state from the Codex alone when newer verification evidence exists.
+
+## Change Discipline
+
+Before changing code, establish:
+
+- what owns the behaviour
+- what evidence describes current behaviour
+- what invariant must remain true
+- what test or verification will demonstrate success
+- what unrelated systems must not change
+
+Prefer the smallest reliable change that preserves architectural boundaries.
+
+Do not refactor unrelated systems while delivering a focused feature or fix unless the refactor is required for correctness.
+
+## Testing Discipline
+
+Testing strategy must match the failure mode being controlled.
+
+Possible verification layers include:
+
+- unit tests
+- integration tests
+- database tests
+- concurrency tests
+- Edge Function tests
+- browser tests
+- Playwright canary tests
+- API/runtime smoke tests
+- production verification
+
+Do not substitute one test layer for another when the risk exists at a different layer.
+
+Concurrency-sensitive behaviour requires concurrency-aware verification.
+
+Payment-sensitive behaviour requires authoritative server/runtime verification.
+
+Browser-state behaviour requires browser-level verification where appropriate.
+
+## Canary Discipline
+
+Canary functionality must remain isolated from protected production lifecycle behaviour unless a specific test explicitly requires controlled interaction.
+
+Canary fixtures must not accidentally:
+
+- create real orders
+- invoke real payment
+- trigger protected checkout lifecycle operations
+- mutate production inventory
+- create persistent production customer data
+
+The exact scope of a canary test must be stated before interpreting its result.
+
+Canary PASS does not mean production-ready unless the required production evidence also exists.
 
 ## Philosophy
 
@@ -186,14 +817,17 @@ Build the smallest reliable solution first.
 
 Optimise for long-term maintainability over short-term convenience.
 
-## Context Acquisition
+Prefer systems that are:
 
-Before making significant changes:
+- understandable
+- observable
+- auditable
+- testable
+- reversible
+- evolvable
 
-1. Read `Codex/README.md`.
-2. Read the latest completed Leaf.
-3. Read the current active Leaf.
-4. Read any linked Architecture Decision Records.
-5. Inspect the implementation before proposing rectification.
+Preserve the reasoning behind important decisions.
 
-Do not infer settled architectural intent from code alone when the Codex records the decision.
+The implementation will evolve.
+
+The engineering knowledge should compound.
