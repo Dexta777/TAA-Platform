@@ -53,6 +53,41 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-20 — Published Auth Contract and Final Webflow Runtime State Reconciled
+
+**Record type:** CURRENT READ-ONLY WEBFLOW CONFIGURATION, PUBLISHED HTML AND ASSET EVIDENCE
+
+**Evidence grade:** CONFIGURATION AND PRODUCTION MARKUP OBSERVATION; NO AUTH RUNTIME OR BROWSER-FLOW PROOF
+
+**Status:** AUTH MARKUP PUBLISHED / THIRD-PARTY ANALYTICS REMOVED / AUTH RUNTIME NOT DEPLOYED
+
+Read-only Webflow evidence recorded the final site publication at `2026-08-20T20:37:29.266Z`.
+Production HTML
+served from both `/` and `/account` contains the `Header Global` Auth controls, shared login, signup,
+reset-password and update-password forms, and fail-closed hidden form state. `/account` additionally
+contains the account root and protected account-content contract. This establishes publication of
+the Webflow markup; it does not establish Auth behavior.
+
+Current Webflow site-wide custom-code configuration has an empty head and a footer containing only
+the existing TAA Platform module loader. GTM, Google Ads tags, the Klaviyo onsite loader, and
+Meta/GA tracking code are absent from both that configuration and the final production HTML observed
+on `/` and `/account`. The TAA Platform loader is therefore the sole site-wide application loader in
+the final published Webflow state. The current homepage page-level custom code retains a Klaviyo
+subscription-form handler; it is distinct from the removed site-wide onsite/analytics loader and is
+not evidence that the removed analytics runtime remains active.
+
+An earlier production read during this reconciliation still observed the prior third-party script
+references from publication `2026-08-20T19:39:21.541Z`. The later Webflow publication above removed
+those references and supersedes that earlier served state. This sequencing is recorded to avoid
+backdating the final observation.
+
+The live loader remains unchanged: it selects release `20260816T054231Z-bec2929c0c5b` by default
+and `20260818T150958Z-bec2929c0c5b` on `/checkout-test`. Both runtime assets responded successfully,
+while the corresponding versioned `taa-auth-callback-prelude.js` paths were absent. No new release
+was generated, built, uploaded, or deployed. No Webflow change or publication was performed, and no
+controlled browser Auth verification or customer-facing activation occurred during this
+reconciliation.
+
 ## 2026-08-20 — Phase A Callback Fallback Correction Verified Locally
 
 **Record type:** LOCAL UNCOMMITTED SOURCE, ADVERSARIAL REGRESSION, SECURITY AND BUILD EVIDENCE

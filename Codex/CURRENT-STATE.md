@@ -13,7 +13,7 @@ making claims about current operational state.
 
 ## Current Objective
 
-Advance the pushed Members Area Phase A authentication foundation and its unpublished Webflow
+Advance the pushed Members Area Phase A authentication foundation and its published Webflow
 contract toward controlled release and browser-verification gates, while finishing the operational
 controls required for a deliberate reservation-v1 production rollout with global reservations off.
 The production customer/account migration is applied: `auth.users → customer_profiles` is canonical,
@@ -21,8 +21,9 @@ The production customer/account migration is applied: `auth.users → customer_p
 visibility is removed. The Phase A Auth Foundation is implemented, committed, and pushed to
 `origin/main`; its latest runtime correction is
 `92dbfc7900ef15ffa48ca6a7134a1c1d35fb9d40`. The `Header Global` Auth contract exists in the
-unpublished Webflow draft, with visual refinement owned by Dexter. No Auth-capable frontend release
-has been generated or deployed, callback ordering remains pending, and no controlled browser or
+published Webflow site, including the shared modal, and the `/account` Auth contract is also
+published. No Auth-capable frontend release has been generated or deployed, the repository callback
+prelude is not loaded in production, callback ordering remains pending, and no controlled browser or
 production-runtime verification has occurred. Customer signup availability, remaining Auth
 dashboard configuration, dashboard data, orders, addresses, payments, checkout identity,
 guest-order claiming, My Animals, and TAA Academy remain outside the completed work.
@@ -47,6 +48,8 @@ B has a local, undeployed implementation; it is not yet an available or producti
   - `92dbfc7900ef15ffa48ca6a7134a1c1d35fb9d40` — Webflow Auth contract display-state correction.
 - No frontend release containing this Auth runtime has been generated or deployed, and the
   customer-facing Auth experience is not activated.
+- The unchanged live loader still selects release `20260816T054231Z-bec2929c0c5b` by default and
+  `20260818T150958Z-bec2929c0c5b` on `/checkout-test`; both releases predate Phase A Auth.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -129,28 +132,29 @@ frontend Auth foundation in the repository without changing Supabase configurati
 - Phase A keeps all account panels hidden because their data/runtime behavior belongs to later
   phases.
 
-The unpublished Webflow draft now contains the `Header Global` Auth contract and correction wiring
+The published Webflow site now contains the `Header Global` Auth contract and correction wiring
 against the runtime attributes below, using Dexter's `Log In Form Global` as the visual source rather
 than introducing a new design:
 `data-auth-controls="true"`, `data-account-link="true"`, `data-account-root="true"`,
 `data-account-content`, `data-account-panel`, `data-auth-root`, `data-auth-form`, `data-auth-field`,
 `data-auth-submit`, `data-auth-open`, `data-auth-toggle`, `data-auth-close`, `data-auth-logout`,
 `data-auth-status`, `data-auth-error`, and `data-auth-view` state regions plus optional
-`data-auth-focusable` for any additional modal control that must join the focus trap. The draft
-keeps protected account and header-state markup hidden initially as defense in depth. Visual
-refinement remains owned by Dexter; the draft has not been published or browser-verified. A future
-callback-ordering gate must load
-`taa-auth-callback-prelude.js` synchronously on `/account` before GTM, advertising pixels, Klaviyo,
-or any other third-party script; the TAA main bundle must then consume the one-time handoff before
-third-party execution can inspect browser state. This ordering remains pending and has not been
-published or runtime-verified.
+`data-auth-focusable` for any additional modal control that must join the focus trap. The published
+markup keeps protected account and header-state markup hidden initially as defense in depth. Visual
+refinement remains owned by Dexter; the published contract has not been browser-verified with the
+Phase A runtime. A future callback-ordering gate must load
+the versioned `taa-auth-callback-prelude.js` synchronously on `/account` before the TAA main bundle
+and before any current or future third-party script; the main bundle must then consume the one-time
+handoff before third-party execution can inspect browser state. The prelude is present only in the
+repository, is absent from the existing live releases, and has not been deployed or runtime-verified.
 
 Focused Auth tests pass 45/45 and the full JavaScript suite passes 119/119. Repository ESLint, changed
 file Prettier checks, the production Vite build, and `git diff --check` pass. The aggregate
 `npm run check` remains blocked at its formatting stage by four pre-existing, unchanged architecture
 Markdown files; this Phase A task did not rewrite them. This is committed source, local test, and
-local build evidence only. It does not establish published Webflow integration, email delivery,
-deployed frontend code, live customer authentication, or production runtime behavior.
+local build evidence only. It does not establish runtime integration between the published markup
+and repository code, email delivery, deployed frontend code, live customer authentication, or
+production runtime behavior.
 
 ## Members Area Webflow Architecture
 
@@ -161,12 +165,12 @@ The newer owner-supplied Webflow state supersedes the earlier component inspecti
   by Dexter;
 - navigation, cart controls, responsive controls, and the future global Auth surface share this
   shell;
-- the unpublished `Header Global` draft implements the single Auth modal and attribute contract;
+- the published `Header Global` implements the single Auth modal and attribute contract;
   checkout will reuse this surface rather than own another login lifecycle;
 - Dexter's `Log In Form Global` remains the visual source, and visual refinement remains owned by
   Dexter;
-- the draft corrections are not published or browser-verified, and callback-prelude ordering before
-  third-party scripts remains pending.
+- the published contract is not connected to an Auth-capable live release and has not been
+  browser-verified; callback-prelude deployment and ordering remain pending.
 
 Some native Webflow Ecommerce and legacy Webflow User pages remain as platform-managed artifacts
 because normal deletion is unavailable. They are excluded from the target TAA architecture and
@@ -175,8 +179,27 @@ links, hidden elements, and component references to those pages have not yet bee
 established, so their current reference state must not be described as zero or absent.
 
 ADR-0003 records `Header Global`, the Webflow/TAA/Supabase responsibility split, and the single Auth
-lifecycle as accepted architecture. The current unpublished draft implementation is tracked here as
-living state rather than retroactively changing that architectural decision record.
+lifecycle as accepted architecture. Its Webflow contract is now published, but its repository
+runtime remains undeployed.
+
+## Webflow Runtime and Analytics Ownership
+
+The ownership boundary remains:
+
+- Webflow owns markup, layout, and presentation;
+- TAA Platform owns the Auth lifecycle, customer application runtime, and future analytics
+  orchestration.
+
+The current site-wide Webflow custom-code configuration has an empty head and a footer containing
+only the TAA Platform module loader. GTM, Google Ads tags, the Klaviyo onsite loader, and Meta/GA
+tracking code have been removed from that configuration and from the production HTML published at
+`2026-08-20T20:37:29.266Z`. The TAA Platform module loader is therefore the sole site-wide
+application loader in the final published Webflow state. A separate homepage-level Klaviyo
+subscription-form handler remains in page-level custom code; it is not the removed Klaviyo onsite
+loader or an analytics runtime and is not being migrated by this Auth phase.
+
+Third-party analytics reintroduction through TAA-controlled architecture remains future work.
+Analytics migration and replacement implementation are not complete.
 
 ## Members Area Auth Email Infrastructure
 
@@ -432,18 +455,22 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 - Do not upgrade B/C/I/J beyond their recorded evidence layers.
 - Do not deploy the local diagnostic commit without a separate review and deployment instruction.
 - Do not treat local Model B tests as AWS, Supabase, deployment, runtime, or production evidence.
-- Do not describe Phase A as customer-accessible until the unpublished Webflow contract, required
-  Supabase Auth production settings, callback ordering, frontend deployment, publication, and
-  controlled runtime verification have separate evidence.
+- Do not describe Phase A as customer-accessible until an Auth-capable frontend release, required
+  Supabase Auth production settings, callback deployment and ordering, published live-script
+  reconciliation, and controlled runtime verification have separate evidence. Published markup
+  alone is not runtime activation.
 - Always inspect `git status --short` and current Git history before attributing evidence.
 
 ## Exact Next Action
 
-Perform a final read-only pre-push review of this documentation provenance correction and push it
-only under separate explicit authorization. Then prepare a separately reviewed immutable frontend
-release from the pushed Auth source, complete callback scrubbing and immediate TAA handoff ordering
-before third-party scripts, confirm the remaining production Auth configuration, and run controlled
-browser verification before any Webflow publication or customer-facing activation.
+Perform a final read-only review of this documentation reconciliation, then commit and push it only
+under separate explicit authorizations. The next operational gate is a separately authorized clean
+generation of an immutable frontend release from the pushed Auth source. That release must contain
+the versioned callback prelude and main bundle, must be verified before upload, and must not trigger
+asset deployment or a Webflow loader cutover without further authorization. After deployment, load
+the prelude before the main bundle and any future third-party scripts, confirm the remaining
+production Auth configuration, and run controlled browser verification before customer-facing
+activation.
 
 ### Model B / Launch-Readiness Follow-up — OPEN / PAUSED
 
