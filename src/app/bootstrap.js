@@ -214,6 +214,10 @@ export function consumeCapturedAuthCallback() {
 
 function captureProtectedVisibility(element) {
   element.hidden = true;
+
+  if (element.getAttribute?.('data-auth-display') && element.style) {
+    element.style.display = 'none';
+  }
 }
 
 export function prepareAuthSurface({ document = globalThis.document } = {}) {
@@ -237,6 +241,9 @@ export function prepareAuthSurface({ document = globalThis.document } = {}) {
     root.dataset.authSessionState = 'loading';
     root.dataset.authVisible = 'false';
     root.hidden = true;
+    if (root.getAttribute?.('data-auth-display') && root.style) {
+      root.style.display = 'none';
+    }
     root.setAttribute('aria-hidden', 'true');
   });
 }

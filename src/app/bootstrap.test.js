@@ -42,8 +42,27 @@ function createDocument({ matchingSurface = false, markers = [] } = {}) {
 }
 
 test('early Auth preparation keeps global header controls fail-closed', () => {
-  const guest = { hidden: false };
-  const authenticated = { hidden: false };
+  const createControl = () => ({
+    getAttribute(name) {
+      return name === 'data-auth-display' ? 'flex' : null;
+    },
+    hidden: false,
+    style: { display: 'flex' },
+  });
+  const guest = createControl();
+  const authenticated = createControl();
+  const modalAttributes = new Map();
+  const modal = {
+    dataset: {},
+    getAttribute(name) {
+      return name === 'data-auth-display' ? 'flex' : null;
+    },
+    hidden: false,
+    setAttribute(name, value) {
+      modalAttributes.set(name, value);
+    },
+    style: { display: 'flex' },
+  };
   const attributes = new Map();
   const root = {
     dataset: {},
@@ -56,7 +75,9 @@ test('early Auth preparation keeps global header controls fail-closed', () => {
   };
   const document = {
     querySelectorAll(selector) {
-      return selector === '[data-auth-controls="true"]' ? [root] : [];
+      if (selector === '[data-auth-controls="true"]') return [root];
+      if (selector === '[data-auth-root]') return [modal];
+      return [];
     },
   };
 
@@ -64,8 +85,13 @@ test('early Auth preparation keeps global header controls fail-closed', () => {
 
   assert.equal(guest.hidden, true);
   assert.equal(authenticated.hidden, true);
+  assert.equal(guest.style.display, 'none');
+  assert.equal(authenticated.style.display, 'none');
   assert.equal(root.dataset.authState, 'loading');
   assert.equal(attributes.get('aria-busy'), 'true');
+  assert.equal(modal.hidden, true);
+  assert.equal(modal.style.display, 'none');
+  assert.equal(modalAttributes.get('aria-hidden'), 'true');
 });
 
 test('Auth bootstrap skips unrelated pages without account markup', async () => {

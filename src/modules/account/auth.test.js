@@ -39,6 +39,7 @@ class FakeElement {
     this.listeners = new Map();
     this.ownerDocument = null;
     this.parentNode = null;
+    this.style = { display: '' };
     this.tagName = tagName.toLowerCase();
     this.textContent = '';
     this.value = '';
@@ -187,7 +188,12 @@ class FakeDocument {
 }
 
 function appendForm(authRoot, mode, fieldNames) {
-  const form = authRoot.appendChild(new FakeElement('form', { 'data-auth-form': mode }));
+  const form = authRoot.appendChild(
+    new FakeElement('form', {
+      'data-auth-display': 'flex',
+      'data-auth-form': mode,
+    })
+  );
   const fields = {};
 
   fieldNames.forEach((fieldName) => {
@@ -224,7 +230,10 @@ function createFixture({ accountContentHidden = false, pathname = '/account' } =
     new FakeElement('header', { 'data-header-global': 'true' })
   );
   const authRoot = headerGlobal.appendChild(
-    new FakeElement('section', { 'data-auth-root': 'true' })
+    new FakeElement('section', {
+      'data-auth-display': 'flex',
+      'data-auth-root': 'true',
+    })
   );
   const login = appendForm(authRoot, 'login', ['email', 'password']);
   const signup = appendForm(authRoot, 'signup', ['first-name', 'last-name', 'email', 'password']);
@@ -237,6 +246,7 @@ function createFixture({ accountContentHidden = false, pathname = '/account' } =
   );
   const openLogin = authControls.appendChild(
     new FakeElement('button', {
+      'data-auth-display': 'flex',
       'data-auth-open': 'login',
       'data-auth-view': 'guest',
     })
@@ -245,6 +255,7 @@ function createFixture({ accountContentHidden = false, pathname = '/account' } =
   const accountLink = authControls.appendChild(
     new FakeElement('a', {
       'data-account-link': 'true',
+      'data-auth-display': 'flex',
       'data-auth-view': 'authenticated',
       href: '/account',
     })
@@ -348,7 +359,9 @@ test('account content remains hidden during initial session resolution, then bec
   assert.equal(fixture.accountPanel.hidden, true);
   assert.equal(fixture.authenticatedView.hidden, true);
   assert.equal(fixture.openLogin.hidden, true);
+  assert.equal(fixture.openLogin.style.display, 'none');
   assert.equal(fixture.accountLink.hidden, true);
+  assert.equal(fixture.accountLink.style.display, 'none');
   assert.equal(fixture.authControls.dataset.authState, AUTH_STATES.LOADING);
 
   sessionResolution.resolve({ session: null });
@@ -359,7 +372,9 @@ test('account content remains hidden during initial session resolution, then bec
   assert.equal(fixture.authRoot.dataset.authVisible, 'true');
   assert.equal(fixture.authRoot.dataset.authMode, 'login');
   assert.equal(fixture.openLogin.hidden, false);
+  assert.equal(fixture.openLogin.style.display, 'flex');
   assert.equal(fixture.accountLink.hidden, true);
+  assert.equal(fixture.accountLink.style.display, 'none');
   assert.equal(fixture.authControls.dataset.authState, AUTH_STATES.GUEST);
 });
 
@@ -388,8 +403,11 @@ test('verified session transitions to authenticated without exposing later-phase
   assert.equal(fixture.accountContent.hidden, false);
   assert.equal(fixture.accountPanel.hidden, true);
   assert.equal(fixture.authRoot.hidden, true);
+  assert.equal(fixture.authRoot.style.display, 'none');
   assert.equal(fixture.openLogin.hidden, true);
+  assert.equal(fixture.openLogin.style.display, 'none');
   assert.equal(fixture.accountLink.hidden, false);
+  assert.equal(fixture.accountLink.style.display, 'flex');
   assert.equal(fixture.accountLink.getAttribute('href'), '/account');
   assert.equal(fixture.authControls.dataset.authState, AUTH_STATES.AUTHENTICATED);
 });
@@ -406,6 +424,7 @@ test('global Auth controls open login and switch among signup and reset modes', 
 
   assert.equal(fixture.authRoot.parentNode, fixture.headerGlobal);
   assert.equal(fixture.authRoot.hidden, true);
+  assert.equal(fixture.authRoot.style.display, 'none');
   assert.equal(fixture.authRoot.inert, true);
   assert.equal(fixture.authRoot.getAttribute('role'), 'dialog');
   assert.equal(fixture.authRoot.getAttribute('aria-modal'), 'true');
@@ -414,6 +433,7 @@ test('global Auth controls open login and switch among signup and reset modes', 
   assert.equal(fixture.openLogin.getAttribute('aria-haspopup'), 'dialog');
   await fixture.openLogin.dispatch('click');
   assert.equal(fixture.authRoot.hidden, false);
+  assert.equal(fixture.authRoot.style.display, 'flex');
   assert.equal(fixture.authRoot.inert, false);
   assert.equal(fixture.authRoot.dataset.authMode, 'login');
   assert.equal(fixture.login.fields.email.focused, true);
@@ -422,11 +442,15 @@ test('global Auth controls open login and switch among signup and reset modes', 
   await fixture.toggleSignup.dispatch('click');
   assert.equal(fixture.authRoot.dataset.authMode, 'signup');
   assert.equal(fixture.signup.form.hidden, false);
+  assert.equal(fixture.signup.form.style.display, 'flex');
   assert.equal(fixture.login.form.hidden, true);
+  assert.equal(fixture.login.form.style.display, 'none');
 
   await fixture.toggleReset.dispatch('click');
   assert.equal(fixture.authRoot.dataset.authMode, 'reset-password');
   assert.equal(fixture.reset.form.hidden, false);
+  assert.equal(fixture.reset.form.style.display, 'flex');
+  assert.equal(fixture.signup.form.style.display, 'none');
 
   fixture.close.focus();
   const forwardWrap = await fixture.document.dispatch('keydown', { key: 'Tab' });

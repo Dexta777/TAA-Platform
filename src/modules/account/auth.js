@@ -112,9 +112,18 @@ function showAccountShell(root) {
   });
 }
 
+function setAuthElementVisible(element, visible) {
+  element.hidden = !visible;
+
+  const visibleDisplay = element.getAttribute?.('data-auth-display');
+  if (visibleDisplay && element.style) {
+    element.style.display = visible ? visibleDisplay : 'none';
+  }
+}
+
 function setStateViews(root, state) {
   root.querySelectorAll('[data-auth-view]').forEach((element) => {
-    element.hidden = element.getAttribute('data-auth-view') !== state;
+    setAuthElementVisible(element, element.getAttribute('data-auth-view') === state);
   });
 }
 
@@ -140,7 +149,7 @@ function setAuthControlRootState(root, state) {
 
 function setAuthRootVisible(root, visible) {
   root.dataset.authVisible = String(visible);
-  root.hidden = !visible;
+  setAuthElementVisible(root, visible);
   root.inert = !visible;
   root.setAttribute('aria-hidden', String(!visible));
 }
@@ -161,7 +170,7 @@ function setAuthRootMode(root, mode) {
   root.querySelectorAll('[data-auth-form], [data-auth-panel]').forEach((element) => {
     const elementMode =
       element.getAttribute('data-auth-form') || element.getAttribute('data-auth-panel');
-    element.hidden = elementMode !== normalizedMode;
+    setAuthElementVisible(element, elementMode === normalizedMode);
   });
 
   return normalizedMode;
