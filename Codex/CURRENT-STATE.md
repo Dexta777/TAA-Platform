@@ -17,9 +17,10 @@ Prepare the locally implemented customer/account database foundation for human r
 deploying it, while finishing the operational controls required for a deliberate reservation-v1
 production rollout with global reservations off. The customer/account slice makes
 `auth.users → customer_profiles` canonical, makes `orders.user_id` the permanent account
-authorization boundary, and removes email-derived order visibility. It is local and uncommitted;
-guest-order claiming, authentication UI, Members Area UI, Webflow changes, and production migration
-remain outside the completed work.
+authorization boundary, and removes email-derived order visibility. The implementation is committed
+locally but remains undeployed, unapplied to live Supabase, unwired into Webflow, and not
+customer-facing; guest-order claiming, authentication UI, Members Area UI, Webflow changes, and
+production migration remain outside the completed work.
 
 Checkout correctness defects found by the payment/recovery matrix have been corrected, focused
 production re-verification is complete, and the mandatory recurring reconciliation scheduler plus
@@ -35,8 +36,11 @@ B has a local, undeployed implementation; it is not yet an available or producti
 
 - `main` began the customer/account foundation slice clean at
   `b49a759aa4666fd70089ef8c460afd959dc5fc0b` (`docs: record Model B local implementation`), with
-  nothing staged. The customer/account migration, tests, ADR and evidence updates described below
-  are local working-tree changes. No deployment or cloud mutation occurred.
+  nothing staged. The reviewed customer/account work is now represented by local commits
+  `2274a4b77696cf2c318fb8a7004619a4c8f62abf` (`feat: harden customer account foundation`) and
+  `3769a80f6d0028d0164392fc8a426e986af2d44f`
+  (`docs: record customer account foundation evidence`). Both remain local and unpushed. No
+  deployment or cloud mutation occurred.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -55,8 +59,10 @@ B has a local, undeployed implementation; it is not yet an available or producti
 
 ## Customer/Account Database Foundation
 
-Migration `20260824120500_customer_account_foundation.sql` is implemented locally and uncommitted;
-it has not been applied to linked or production Supabase. Its verified local contract is:
+Migration `20260824120500_customer_account_foundation.sql` is implemented and committed locally in
+`2274a4b77696cf2c318fb8a7004619a4c8f62abf`; its local evidence is recorded in
+`3769a80f6d0028d0164392fc8a426e986af2d44f`. It has not been applied to linked or production
+Supabase. Its verified local contract is:
 
 - `auth.users → customer_profiles` is the canonical one-to-one customer identity projection;
 - the Auth trigger creates missing profiles, synchronizes authoritative Auth email, and preserves
@@ -333,11 +339,8 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 
 ## Exact Next Action
 
-Complete the corrected documentation/provenance re-review for the customer/account database
-foundation, which is the active development workstream. Its local implementation and substantive
-technical review are complete, but the seven-file change remains unstaged, uncommitted, undeployed,
-and unapplied to live Supabase. If the corrected provenance review is approved, proceed only through
-a separate commit-authorisation gate for those reviewed customer/account foundation changes.
+Perform a final read-only pre-push review of the resulting customer/account foundation commit range.
+If approved, push only under separate explicit authorization.
 
 ### Model B / Launch-Readiness Follow-up — OPEN / PAUSED
 
