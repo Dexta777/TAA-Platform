@@ -13,13 +13,14 @@ making claims about current operational state.
 
 ## Current Objective
 
-Prepare the locally implemented Members Area Phase A authentication foundation for review and a
-separate Webflow/configuration gate, while finishing the operational controls required for a
+Advance the locally committed Members Area Phase A authentication foundation toward a separate
+Webflow/configuration gate, while finishing the operational controls required for a
 deliberate reservation-v1 production rollout with global reservations off. The production
 customer/account migration is applied: `auth.users → customer_profiles` is canonical,
 `orders.user_id` is the permanent account authorization boundary, and email-derived order
-visibility is removed. The Phase A JavaScript now exists only in the uncommitted working tree. It is
-not wired into Webflow, published, or production-runtime verified; customer signup availability,
+visibility is removed. The Phase A Auth Foundation is implemented locally and committed in
+`42317ebc982fee3376ed68678c7a37f01d40cd97`. It has not been pushed, deployed, wired into Webflow,
+published, or production-runtime verified; customer signup availability,
 remaining Auth dashboard configuration, dashboard data, orders, addresses, payments, checkout
 identity, guest-order claiming, My Animals, and TAA Academy remain outside the completed work.
 
@@ -36,9 +37,10 @@ B has a local, undeployed implementation; it is not yet an available or producti
 ## Git and Deployment State
 
 - `main` began Members Area Phase A clean at
-  `b6556e470e2e19565ae5965e6e7e43f454fd7faf`. The current working tree contains the uncommitted Auth
-  service, account lifecycle module, bootstrap integration, focused tests, and this documentation
-  update. Nothing is staged, committed, pushed, deployed, or published by this Phase A task.
+  `b6556e470e2e19565ae5965e6e7e43f454fd7faf`. The Auth service, account lifecycle module, bootstrap
+  integration, focused tests, and architecture documentation are committed locally in
+  `42317ebc982fee3376ed68678c7a37f01d40cd97`. That implementation commit has not been pushed,
+  deployed, wired into Webflow, or published.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -88,8 +90,8 @@ behavior.
 
 ## Members Area Phase A — Authentication Foundation
 
-The current uncommitted working tree implements the frontend Auth foundation without changing
-Webflow or Supabase configuration:
+Commit `42317ebc982fee3376ed68678c7a37f01d40cd97` implements the frontend Auth foundation locally
+without changing Webflow or Supabase configuration:
 
 - `src/services/supabase/auth.js` owns only Supabase Auth SDK calls, normalized values, and safe
   error normalization;
@@ -425,12 +427,13 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 
 ## Exact Next Action
 
-Review the accumulated uncommitted Phase A diff and ADR-0003. If approved, run a separate bounded
-Webflow contract-wiring gate for `Header Global` and `/account`: add the documented attributes, keep
-unresolved and protected markup initially hidden, and place callback scrubbing plus immediate TAA
-handoff consumption before third-party scripts. Do not publish until the remaining production Auth
-configuration and controlled browser-verification gates are ready. Commit and push still require
-separate authorization.
+Perform a final read-only pre-push review of the local commits ahead of `origin/main`, including
+Phase A commit `42317ebc982fee3376ed68678c7a37f01d40cd97` and its separate provenance correction. Push
+only under separate explicit authorization. The subsequent bounded Webflow contract-wiring gate for
+`Header Global` and `/account` must add the documented attributes, keep unresolved and protected
+markup initially hidden, and place callback scrubbing plus immediate TAA handoff consumption before
+third-party scripts. Do not publish until the remaining production Auth configuration and
+controlled browser-verification gates are ready.
 
 ### Model B / Launch-Readiness Follow-up — OPEN / PAUSED
 
