@@ -14,4 +14,13 @@ if (missingEnvironmentVariables.length > 0) {
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabasePublishableKey);
+export const SUPABASE_AUTH_OPTIONS = Object.freeze({
+  autoRefreshToken: true,
+  detectSessionInUrl: false,
+  flowType: 'pkce',
+  persistSession: true,
+});
+
+export const supabase = createClient(supabaseUrl, supabasePublishableKey, {
+  auth: SUPABASE_AUTH_OPTIONS,
+});

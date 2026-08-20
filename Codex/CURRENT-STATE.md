@@ -13,14 +13,15 @@ making claims about current operational state.
 
 ## Current Objective
 
-Prepare the locally implemented customer/account database foundation for human review without
-deploying it, while finishing the operational controls required for a deliberate reservation-v1
-production rollout with global reservations off. The customer/account slice makes
-`auth.users → customer_profiles` canonical, makes `orders.user_id` the permanent account
-authorization boundary, and removes email-derived order visibility. The implementation is committed
-locally but remains undeployed, unapplied to live Supabase, unwired into Webflow, and not
-customer-facing; guest-order claiming, authentication UI, Members Area UI, Webflow changes, and
-production migration remain outside the completed work.
+Prepare the locally implemented Members Area Phase A authentication foundation for review and a
+separate Webflow/configuration gate, while finishing the operational controls required for a
+deliberate reservation-v1 production rollout with global reservations off. The production
+customer/account migration is applied: `auth.users → customer_profiles` is canonical,
+`orders.user_id` is the permanent account authorization boundary, and email-derived order
+visibility is removed. The Phase A JavaScript now exists only in the uncommitted working tree. It is
+not wired into Webflow, published, or production-runtime verified; customer signup availability,
+remaining Auth dashboard configuration, dashboard data, orders, addresses, payments, checkout
+identity, guest-order claiming, My Animals, and TAA Academy remain outside the completed work.
 
 Checkout correctness defects found by the payment/recovery matrix have been corrected, focused
 production re-verification is complete, and the mandatory recurring reconciliation scheduler plus
@@ -34,13 +35,10 @@ B has a local, undeployed implementation; it is not yet an available or producti
 
 ## Git and Deployment State
 
-- `main` began the customer/account foundation slice clean at
-  `b49a759aa4666fd70089ef8c460afd959dc5fc0b` (`docs: record Model B local implementation`), with
-  nothing staged. The reviewed customer/account work is now represented by local commits
-  `2274a4b77696cf2c318fb8a7004619a4c8f62abf` (`feat: harden customer account foundation`) and
-  `3769a80f6d0028d0164392fc8a426e986af2d44f`
-  (`docs: record customer account foundation evidence`). Both remain local and unpushed. No
-  deployment or cloud mutation occurred.
+- `main` began Members Area Phase A clean at
+  `b6556e470e2e19565ae5965e6e7e43f454fd7faf`. The current working tree contains the uncommitted Auth
+  service, account lifecycle module, bootstrap integration, focused tests, and this documentation
+  update. Nothing is staged, committed, pushed, deployed, or published by this Phase A task.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -59,10 +57,9 @@ B has a local, undeployed implementation; it is not yet an available or producti
 
 ## Customer/Account Database Foundation
 
-Migration `20260824120500_customer_account_foundation.sql` is implemented and committed locally in
-`2274a4b77696cf2c318fb8a7004619a4c8f62abf`; its local evidence is recorded in
-`3769a80f6d0028d0164392fc8a426e986af2d44f`. It has not been applied to linked or production
-Supabase. Its verified local contract is:
+Migration `20260824120500_customer_account_foundation.sql` is committed and was applied to
+production Supabase project `zxmywtmjvfjgdjcstgtn` under the preceding authorized migration gate.
+Its contract is:
 
 - `auth.users → customer_profiles` is the canonical one-to-one customer identity projection;
 - the Auth trigger creates missing profiles, synchronizes authoritative Auth email, and preserves
@@ -81,13 +78,100 @@ Supabase. Its verified local contract is:
 - historical order, item, address, price, discount, shipment, and bounded payment snapshots remain
   independent of mutable customer profile/address data.
 
-Current working-tree verification passed a clean replay of all 22 migrations, focused customer and
+Pre-application working-tree verification passed a clean replay of all 22 migrations, focused customer and
 checkout-finalization pgTAP tests (85/85), the full database suite (613/613), database lint with zero
 schema errors, local catalog privilege/RLS assertions, nine relevant Deno tests, and type checks for
 the checkout creation, webhook, and reconciliation functions. The local security advisor reported
 no customer/account finding; its sole warning is the pre-existing out-of-scope placement of `pg_net`
 in `public`. This evidence is local only and does not establish deployment or production runtime
 behavior.
+
+## Members Area Phase A — Authentication Foundation
+
+The current uncommitted working tree implements the frontend Auth foundation without changing
+Webflow or Supabase configuration:
+
+- `src/services/supabase/auth.js` owns only Supabase Auth SDK calls, normalized values, and safe
+  error normalization;
+- the browser client explicitly uses PKCE, persistent sessions, automatic token refresh, and manual
+  callback processing;
+- `src/modules/account/auth.js` owns loading, guest, authenticated, error, and recovery state,
+  attribute-driven login/signup/reset/update UI behavior, local logout cleanup, verified account
+  session resolution, and a literal `/account` redirect allowlist;
+- protected account content is always hidden during loading and guest states, including when markup
+  starts hidden, and is revealed explicitly only after session plus user verification;
+- the Auth modal now establishes dialog semantics, focus entry/restoration, Tab containment, Escape
+  handling, trigger expansion state, and synchronous per-form submission ownership;
+- persisted authenticated sessions on `/log-in`, `/sign-up`, and `/reset-password` redirect to the
+  fixed `/account` destination unless a recovery callback is actively being processed;
+- `public/taa-auth-callback-prelude.js` defines the future synchronous early callback boundary: only
+  `/account` with expected Auth parameters is captured, callback URL material is immediately
+  scrubbed, legacy token fragments fail closed without persistence, and the one-time PKCE handoff is
+  removed by the main bundle before Auth initialization;
+- fallback callback capture enforces the same authorization-code length and PKCE flow-ID validation
+  as the early prelude; one-shot closure handoff consumption rejects malformed or stale handoffs,
+  and callback-like URLs on unrelated routes remain untouched;
+- bootstrap hides protected account content fail-closed and lazy-loads Auth only on matching routes
+  or markup;
+- `data-auth-controls="true"` extends the same canonical lifecycle to global header controls:
+  unresolved and identity-revalidation states hide both controls, guests see `LOGIN`, authenticated
+  customers see the semantic `/account` link, and sign-out clears authenticated UI synchronously;
+- pages containing any combination of global controls, the modal, or the account root initialize one
+  lazy-loaded Auth controller rather than duplicating session queries;
+- Phase A keeps all account panels hidden because their data/runtime behavior belongs to later
+  phases.
+
+The separate future Webflow gate must apply the runtime contract without a visual redesign:
+`data-auth-controls="true"`, `data-account-link="true"`, `data-account-root="true"`,
+`data-account-content`, `data-account-panel`, `data-auth-root`, `data-auth-form`, `data-auth-field`,
+`data-auth-submit`, `data-auth-open`, `data-auth-toggle`, `data-auth-close`, `data-auth-logout`,
+`data-auth-status`, `data-auth-error`, and `data-auth-view` state regions plus optional
+`data-auth-focusable` for any additional modal control that must join the focus trap. Protected
+account and header-state markup must be hidden in its initial Webflow state as defense in depth. A
+separate Webflow gate must load
+`taa-auth-callback-prelude.js` synchronously on `/account` before GTM, advertising pixels, Klaviyo,
+or any other third-party script; the TAA main bundle must then consume the one-time handoff before
+third-party execution can inspect browser state. This ordering is a required part of the security
+contract and has been documented and locally tested, but no Webflow script or ordering change has
+been performed.
+
+Focused Auth tests pass 45/45 and the full JavaScript suite passes 119/119. Repository ESLint, changed
+file Prettier checks, the production Vite build, and `git diff --check` pass. The aggregate
+`npm run check` remains blocked at its formatting stage by four pre-existing, unchanged architecture
+Markdown files; this Phase A task did not rewrite them. This is source, local test, and local build
+evidence only. It does not establish Webflow integration, email delivery, deployed frontend code,
+live customer authentication, or production runtime behavior.
+
+## Members Area Webflow Architecture
+
+The newer owner-supplied Webflow state supersedes the earlier component inspection:
+
+- `Header Legacy` is the renamed predecessor and has zero intended instances;
+- `Header Global` is the intentional TAA global application shell on the active surfaces selected
+  by Dexter;
+- navigation, cart controls, responsive controls, and the future global Auth surface share this
+  shell;
+- the single Auth modal is intended to live inside `Header Global` and checkout will reuse it rather
+  than own another login lifecycle;
+- the Auth attributes and modal markup are not yet wired, published, or browser-verified by this
+  repository task.
+
+Some native Webflow Ecommerce and legacy Webflow User pages remain as platform-managed artifacts
+because normal deletion is unavailable. They are excluded from the target TAA architecture and
+require no user migration because no Webflow User accounts were created. Existing links, CMS-bound
+links, hidden elements, and component references to those pages have not yet been exhaustively
+established, so their current reference state must not be described as zero or absent.
+
+ADR-0003 records `Header Global`, the Webflow/TAA/Supabase responsibility split, and the single Auth
+lifecycle as accepted architecture without claiming that the Webflow contract is implemented.
+
+## Members Area Auth Email Infrastructure
+
+Owner-supplied operational evidence current to this task states that Amazon SES production sending
+is available in `eu-west-2`, `auth.theanimalalchemist.com` is configured and verified, and Dexter
+has configured custom Supabase Auth SMTP. Generic Supabase Auth templates remain in use pending a
+later Figma-branded template gate. This task did not inspect or mutate AWS, DNS, Supabase Auth, SMTP,
+or email templates and sent no email, so it creates no new delivery or production-runtime evidence.
 
 ## Reservation-v1 Matrix
 
@@ -335,12 +419,18 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 - Do not upgrade B/C/I/J beyond their recorded evidence layers.
 - Do not deploy the local diagnostic commit without a separate review and deployment instruction.
 - Do not treat local Model B tests as AWS, Supabase, deployment, runtime, or production evidence.
+- Do not describe Phase A as customer-accessible until the Webflow attribute contract, Supabase Auth
+  production settings, deployment, and controlled runtime verification have separate evidence.
 - Always inspect `git status --short` and current Git history before attributing evidence.
 
 ## Exact Next Action
 
-Perform a final read-only pre-push review of the resulting customer/account foundation commit range.
-If approved, push only under separate explicit authorization.
+Review the accumulated uncommitted Phase A diff and ADR-0003. If approved, run a separate bounded
+Webflow contract-wiring gate for `Header Global` and `/account`: add the documented attributes, keep
+unresolved and protected markup initially hidden, and place callback scrubbing plus immediate TAA
+handoff consumption before third-party scripts. Do not publish until the remaining production Auth
+configuration and controlled browser-verification gates are ready. Commit and push still require
+separate authorization.
 
 ### Model B / Launch-Readiness Follow-up — OPEN / PAUSED
 

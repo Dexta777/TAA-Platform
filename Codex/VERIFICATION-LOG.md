@@ -53,6 +53,213 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-20 — Phase A Callback Fallback Correction Verified Locally
+
+**Record type:** LOCAL UNCOMMITTED SOURCE, ADVERSARIAL REGRESSION, SECURITY AND BUILD EVIDENCE
+
+**Evidence grade:** CURRENT WORKING TREE ONLY; NO WEBFLOW, DEPLOYMENT OR PRODUCTION RUNTIME PROOF
+
+**Status:** REQUIRED FALLBACK CORRECTION IMPLEMENTED AND LOCALLY VERIFIED / NOT DEPLOYED
+
+The fallback callback capture now enforces the same 4096-character authorization-code limit and
+PKCE flow-ID validation as the early callback prelude. A supplied malformed flow ID or oversized
+code produces invalid callback state, is scrubbed from the URL, and stops before PKCE exchange,
+session resolution, or authenticated state. Valid callbacks, unrelated query parameters, unrelated
+fragments, and callback-like material outside `/account` retain their prior behavior.
+
+Current working-tree verification on 2026-08-20 established:
+
+- focused Auth service, callback-prelude, bootstrap, lifecycle, modal, header, recovery, redirect,
+  and adversarial callback tests: 45/45 PASS;
+- full repository JavaScript suite scoped to `src/**/*.test.js`: 119/119 PASS;
+- repository ESLint: PASS;
+- changed-file Prettier check: PASS after formatting only the two edited callback source files;
+- Vite production build: PASS, with Auth retained as a separate lazy-loaded chunk;
+- `git diff --check`: PASS;
+- accumulated Phase A scan: no credential, secret, private key, production callback value, customer
+  PII, private filesystem path, or callback value in application logging found.
+
+This correction also qualifies the Webflow evidence boundary: legacy Webflow User and Ecommerce
+pages are excluded from the target architecture and no Webflow User migration is required, but
+links, CMS-bound links, hidden elements, and component references have not been exhaustively
+established. No claim of zero current references or dependencies is made.
+
+No Webflow, Supabase, SMTP, database, Edge Function, Stripe, Klaviyo, deployment, publication,
+commit, push, or production runtime state changed. The tests and build apply only to the current
+dirty working tree.
+
+## 2026-08-20 — Customer/Account Foundation Production Migration State Recorded
+
+**Record type:** SEPARATELY CONFIRMED PRODUCTION MIGRATION EVIDENCE RECORDED DURING A LATER LOCAL GATE
+
+**Evidence grade:** PRIOR AUTHORIZED PRODUCTION GATE; NOT RE-EXECUTED OR LIVE-RECHECKED BY THIS TASK
+
+**Status:** APPLIED IN PRODUCTION / MIGRATION HISTORY REFLECTS APPLIED STATE
+
+The separately authorized production migration gate confirmed successful application of
+`20260824120500_customer_account_foundation.sql` to Supabase project
+`zxmywtmjvfjgdjcstgtn`. Post-application migration history reflected `20260824120500` as applied.
+This later record qualifies, but does not rewrite, the earlier local pre-application evidence below.
+The current repository correction did not connect to or mutate Supabase and did not apply or repair
+any migration.
+
+## 2026-08-20 — Global Header Authentication State Support Verified Locally
+
+**Record type:** LOCAL UNCOMMITTED SOURCE, MODULE, REGRESSION, SECURITY AND BUILD EVIDENCE
+
+**Evidence grade:** CURRENT WORKING TREE ONLY; NO WEBFLOW, DEPLOYMENT OR PRODUCTION RUNTIME PROOF
+
+**Status:** IMPLEMENTED AND LOCALLY VERIFIED / WEBFLOW CONTRACT NOT WIRED / NOT DEPLOYED
+
+The existing Phase A controller was extended without creating a second Auth lifecycle. Global
+header roots marked `data-auth-controls="true"` now consume the same loading, guest,
+authenticated, error, sign-out, recovery, and identity-revalidation state that protects `/account`
+and owns the global modal. Early bootstrap hides every header `data-auth-view` fail closed and uses
+global controls as an Auth lazy-loading marker. Multiple Auth markers on one page still initialize
+one controller and one initial session/user verification sequence.
+
+Current working-tree verification on 2026-08-20 established:
+
+- focused callback-prelude, bootstrap, Auth service, lifecycle, global-header, modal, recovery,
+  accessibility, redirect, and submission-concurrency tests: 40/40 PASS;
+- full repository JavaScript suite scoped to `src/**/*.test.js`: 114/114 PASS;
+- repository ESLint: PASS;
+- all changed JavaScript, callback prelude, Markdown, and test files checked with Prettier: PASS;
+- Vite production build: PASS, with Auth retained as a separate lazy-loaded chunk;
+- `git diff --check`: PASS;
+- accumulated Phase A diff scan: no secret, SMTP credential, Supabase secret, token, private key,
+  customer PII, private filesystem path, or logged callback value found.
+
+The aggregate `npm run check` stopped in its repository-wide Prettier stage on the same four
+pre-existing, unchanged architecture files: `Architecture-Glossary.md`, `Architecture-Index.md`,
+`Realms.md`, and `Repository-Topology.md`. The changed-file Prettier gate and independent repository
+ESLint both passed; the unrelated files were not rewritten.
+
+The header regressions establish that both `LOGIN` and `ACCOUNT` begin hidden, initial resolution
+keeps both hidden, guest state reveals only `LOGIN`, verified authentication reveals only `ACCOUNT`,
+and sign-out hides stale authenticated state before the SDK request settles. A cross-tab-style Auth
+identity event enters loading synchronously before re-verification and then renders the newly
+verified state. The semantic account link remains the literal `/account` destination. One header
+trigger opens the existing global modal contract, including the already-covered login, signup,
+recovery-request, and password-update modes.
+
+The unchanged cart, product, checkout, confirmation, callback, and Auth service tests passed inside
+the 114-test JavaScript run. Source review found no Auth call into cart storage, product selection,
+checkout attempts or ownership, Stripe request construction, reservation-v1, or confirmation
+logic. This is regression evidence at the local source/test layer, not browser or production proof.
+
+A separate bare `node --test` discovery command was also observed and is not the repository
+JavaScript-suite command: Node discovered Deno `.ts` tests, passed 138 tests, and failed 19 because
+the Node runner does not provide `Deno` or support `jsr:` imports. The established JavaScript scope
+was then run explicitly and passed 114/114. No Deno source or test was changed to mask that runner
+mismatch.
+
+Owner-supplied current-state evidence says the former `Header` is now `Header Legacy` with zero
+intended instances and the former `Header test` is now `Header Global`, placed on Dexter-selected
+active surfaces as the intended global application shell. ADR-0003 records that architecture.
+Owner-supplied evidence also states that SES production sending is available in `eu-west-2`, the
+Auth subdomain is verified, and custom Supabase Auth SMTP is configured; this repository task did
+not independently inspect or mutate those systems and sent no email.
+
+No Webflow markup, attribute, component, script, or publish changed. No Supabase Auth configuration,
+SMTP setting, database schema, migration, Edge Function, Stripe, Klaviyo, cart, product, checkout,
+reservation, or confirmation implementation changed. Nothing was staged, committed, pushed,
+deployed, published, or production-runtime verified. The evidence applies only to the current dirty
+working tree and does not establish customer-facing Auth availability.
+
+## 2026-08-20 — Members Area Phase A Authentication Foundation Corrections Verified Locally
+
+**Record type:** LOCAL UNCOMMITTED SOURCE, MODULE, REGRESSION, SECURITY AND BUILD EVIDENCE
+
+**Evidence grade:** CURRENT WORKING TREE ONLY; NO WEBFLOW, DEPLOYMENT OR PRODUCTION RUNTIME PROOF
+
+**Status:** REQUIRED CORRECTIONS IMPLEMENTED AND LOCALLY VERIFIED / NOT WIRED / NOT DEPLOYED
+
+The reviewed Phase A working tree was corrected without changing its original base commit
+`b6556e470e2e19565ae5965e6e7e43f454fd7faf`. The correction makes protected account visibility an
+explicit state outcome, introduces a narrowly scoped early callback prelude and one-time handoff,
+redirects verified sessions away from guest Auth routes, adds modal keyboard/focus semantics, and
+prevents rapid duplicate form submissions with synchronous per-form ownership.
+
+Current working-tree verification on 2026-08-20 established:
+
+- focused callback-prelude, bootstrap, Auth-service, lifecycle, visibility, redirect, accessibility,
+  recovery, and submission-concurrency tests: 36/36 PASS;
+- full repository JavaScript suite through Node's built-in test runner: 110/110 PASS;
+- repository ESLint: PASS;
+- changed JavaScript, prelude, and test files checked with Prettier: PASS;
+- Vite production build: PASS, with Auth retained as a separate lazy-loaded chunk;
+- `git diff --check`: PASS.
+
+The tests establish that initially hidden protected content remains hidden while loading and for a
+guest, then is explicitly revealed only after verified authentication; later-phase account panels
+remain hidden. Callback-like query and fragment material outside `/account` is left untouched.
+Approved callback material is scrubbed by the dependency-free prelude, handed off once, rejected if
+stale or malformed, discarded outside `/account`, and never persists legacy access or refresh
+tokens or the PKCE authorization code in browser storage. The modal exercises dialog semantics,
+focus entry/restoration, forward and reverse Tab
+containment, Escape, trigger expansion state, and inert hidden state. Login, signup, and recovery
+forms each reject a second rapid submission while their first request is unresolved.
+
+No Webflow surface or script ordering was changed. The prelude is a repository implementation of the
+future Webflow contract, not deployed callback protection. A separately authorized Webflow gate
+must place it synchronously on `/account`, then run immediate TAA handoff consumption before any
+analytics, advertising, Klaviyo, or other third-party script. Protected markup must also be hidden
+in the initial Webflow/CSS state. Those requirements have not been browser- or runtime-verified.
+
+No Supabase configuration, SMTP setting, database schema, migration, Edge Function, Webflow,
+Stripe, or Klaviyo system changed. No email was sent. Nothing was staged, committed, pushed,
+deployed, published, or production-runtime verified. The evidence applies only to the current dirty
+working tree and does not establish customer-facing Auth availability.
+
+## 2026-08-20 — Members Area Phase A Authentication Foundation Implemented and Verified Locally
+
+**Record type:** LOCAL UNCOMMITTED SOURCE, MODULE, REGRESSION, SECURITY AND BUILD EVIDENCE
+
+**Evidence grade:** CURRENT WORKING TREE ONLY; NO DEPLOYMENT OR PRODUCTION RUNTIME PROOF
+
+**Status:** IMPLEMENTED AND LOCALLY VERIFIED / NOT WIRED INTO WEBFLOW / NOT DEPLOYED
+
+Work began from clean `main` at `b6556e470e2e19565ae5965e6e7e43f454fd7faf`, with nothing staged.
+The current working tree adds the Supabase Auth service boundary, explicit persistent PKCE client
+configuration, the account Auth lifecycle module, early callback capture/scrubbing, fail-closed
+account preparation, conditional bootstrap loading, and focused tests. It does not add dashboard,
+orders, addresses, payments, checkout account creation, guest-order claiming, My Animals, or TAA
+Academy behavior.
+
+Current working-tree verification on 2026-08-20 established:
+
+- focused Auth service, lifecycle, redirect, callback, DOM-flash, and bootstrap tests: 23/23 PASS;
+- full repository JavaScript suite through Node's built-in test runner: 97/97 PASS;
+- repository ESLint: PASS;
+- changed JavaScript and test files checked with Prettier: PASS;
+- Vite production build: PASS, with Auth emitted as a separate lazy-loaded chunk;
+- `git diff --check`: PASS;
+- changed-file scan: no secret, credential, private key, customer PII, or newly embedded project
+  endpoint/key value found.
+
+The aggregate `npm run check` did not establish a repository-wide formatting pass. Its Prettier stage
+reported the same four unchanged architecture Markdown files:
+`Architecture-Glossary.md`, `Architecture-Index.md`, `Realms.md`, and `Repository-Topology.md`. The
+task preserved those unrelated files. Independent repository ESLint and targeted formatting checks
+passed.
+
+The tests establish local module behavior: protected account content remains hidden until session
+resolution; authenticated state requires a session plus a verified `getUser()` result; guest and
+logout transitions clear protected UI; password recovery uses generic public messaging and a
+verified recovery session; redirects allow only literal `/account`; callback query/fragment
+material is captured in memory and removed before deferred bootstrap; and Auth is not loaded on an
+unrelated page without matching markup.
+
+No Supabase Auth dashboard setting, SMTP setting, CAPTCHA setting, password policy, database schema,
+migration, Edge Function, Webflow page/component, Stripe integration, Klaviyo integration, or live
+customer record changed. No email was sent. Nothing was staged, committed, pushed, deployed, or
+published. These results do not establish production Auth activation, Webflow contract wiring,
+customer signup availability, email deliverability, deployed callback safety, or live browser
+behavior. In particular, application code scrubs callback material before deferred TAA bootstrap,
+but the required future Webflow ordering that places callback scrubbing ahead of third-party
+analytics/marketing scripts has not been performed or runtime verified.
+
 ## 2026-08-20 — Customer/Account Database Foundation Implemented and Verified Locally
 
 **Record type:** LOCAL UNCOMMITTED MIGRATION, DATABASE, SECURITY AND REGRESSION EVIDENCE

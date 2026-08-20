@@ -1,4 +1,13 @@
-import { bootstrapApp } from './app/bootstrap.js';
+import {
+  bootstrapApp,
+  captureAuthCallback,
+  consumeAuthCallbackHandoff,
+  prepareAuthSurface,
+} from './app/bootstrap.js';
+
+consumeAuthCallbackHandoff();
+captureAuthCallback();
+prepareAuthSurface();
 
 function startApp() {
   bootstrapApp().catch((error) => {
