@@ -2,7 +2,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(24);
+SELECT plan(26);
 
 DELETE FROM vault.secrets
 WHERE name = 'taa_identity_fingerprint_pepper';
@@ -267,6 +267,16 @@ SELECT ok(
 
 SELECT is(
   (
+    SELECT user_id
+    FROM public.orders
+    WHERE checkout_intent_id = '40000000-0000-0000-0000-000000000101'
+  ),
+  NULL::uuid,
+  'guest paid finalization preserves null order ownership'
+);
+
+SELECT is(
+  (
     SELECT count(*)
     FROM public.discount_redemptions
     WHERE checkout_intent_id = '40000000-0000-0000-0000-000000000101'
@@ -308,6 +318,16 @@ SELECT ok(
     WHERE checkout_intent_id = '40000000-0000-0000-0000-000000000102'
   ),
   'merchandise-discount order retains canonical amount semantics'
+);
+
+SELECT is(
+  (
+    SELECT user_id
+    FROM public.orders
+    WHERE checkout_intent_id = '40000000-0000-0000-0000-000000000102'
+  ),
+  '10000000-0000-0000-0000-000000000101'::uuid,
+  'authenticated paid finalization copies checkout intent ownership to the order'
 );
 
 SELECT is(

@@ -140,6 +140,7 @@ Rectification:
 ## ADR Index
 
 - [ADR-0001 — Reservation-Owned Checkout Finalization](ADR-0001-reservation-owned-checkout-finalization.md)
+- [ADR-0002 — Customer Identity and Order Ownership](ADR-0002-customer-identity-and-order-ownership.md)
 
 ---
 
