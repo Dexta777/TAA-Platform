@@ -13,26 +13,30 @@ making claims about current operational state.
 
 ## Current Objective
 
-Finish the operational controls required for a deliberate reservation-v1 production rollout while
-keeping global reservations off. Checkout correctness defects found by the payment/recovery matrix
-have been corrected, focused production re-verification is complete, and the mandatory recurring
-reconciliation scheduler plus dual-layer heartbeat are production-active. The database-native
-lifecycle monitor and explicit rollback thresholds are also production-active and verified. The
-remaining global-enable readiness work is an authenticated external alert route with an independent
-critical fallback, three bounded human-readiness action streams, and an explicit launch decision—not
-another repetition of already-closed payment or recovery scenarios. The authoritative
-operator/incident runbook is committed and has passed source-consistency, security, focused
-validation and tabletop review. Model B now has a local, undeployed implementation; it is not yet an
-available or production-proven failsafe.
+Prepare the locally implemented customer/account database foundation for human review without
+deploying it, while finishing the operational controls required for a deliberate reservation-v1
+production rollout with global reservations off. The customer/account slice makes
+`auth.users → customer_profiles` canonical, makes `orders.user_id` the permanent account
+authorization boundary, and removes email-derived order visibility. It is local and uncommitted;
+guest-order claiming, authentication UI, Members Area UI, Webflow changes, and production migration
+remain outside the completed work.
+
+Checkout correctness defects found by the payment/recovery matrix have been corrected, focused
+production re-verification is complete, and the mandatory recurring reconciliation scheduler plus
+dual-layer heartbeat are production-active. The database-native lifecycle monitor and explicit
+rollback thresholds are also production-active and verified. The remaining global-enable readiness
+work is an authenticated external alert route with an independent critical fallback, three bounded
+human-readiness action streams, and an explicit launch decision—not another repetition of
+already-closed payment or recovery scenarios. The authoritative operator/incident runbook is
+committed and has passed source-consistency, security, focused validation and tabletop review. Model
+B has a local, undeployed implementation; it is not yet an available or production-proven failsafe.
 
 ## Git and Deployment State
 
-- Before the local Model B work, `main` and `origin/main` were synchronized at
-  `592e367b8467e10a0240befedb1cc03c47769369`. Local commit
-  `f177965bf6d1064a4899ba679242814f6ef66c5b` now represents the reviewed Model B infrastructure,
-  tests and operational documentation; this project-memory update is its separate evidence
-  boundary. The Model B source-control work remains local and unpushed. No deployment or cloud
-  mutation occurred.
+- `main` began the customer/account foundation slice clean at
+  `b49a759aa4666fd70089ef8c460afd959dc5fc0b` (`docs: record Model B local implementation`), with
+  nothing staged. The customer/account migration, tests, ADR and evidence updates described below
+  are local working-tree changes. No deployment or cloud mutation occurred.
 - Migration `20260824120200_checkout_replacement_admission_lifecycle.sql` is deployed and represented
   in remote Git history.
 - The synchronized cleanup series contains:
@@ -48,6 +52,36 @@ available or production-proven failsafe.
 - Monitoring migration `20260824120400_checkout_lifecycle_monitoring.sql` is deployed in production
   and represented with its focused database/concurrency regressions and operational documentation
   in remote commit `27d19a78ddd16002c98713946e866aac9c2851f0`.
+
+## Customer/Account Database Foundation
+
+Migration `20260824120500_customer_account_foundation.sql` is implemented locally and uncommitted;
+it has not been applied to linked or production Supabase. Its verified local contract is:
+
+- `auth.users → customer_profiles` is the canonical one-to-one customer identity projection;
+- the Auth trigger creates missing profiles, synchronizes authoritative Auth email, and preserves
+  customer-edited names;
+- authenticated profile writes are column-limited to `first_name`, `last_name`, and `phone`, while
+  `stripe_customer_id`, email, identity, and timestamps remain server-managed;
+- non-null Stripe customer linkage is unique, guarded by a fail-closed duplicate preflight;
+- customer addresses retain own-row CRUD with immutable browser ownership/timestamps and partial
+  unique indexes enforcing at most one shipping and one billing default per user;
+- permanent order, order-item, and shipment visibility uses only explicit Auth ownership:
+  `orders.user_id = auth.uid()`; historical matching email is not authorization;
+- existing guest orders remain `orders.user_id IS NULL`; no guest order is claimed or modified;
+- `public.profiles` is retired only after locked, fail-closed empty/dependency checks;
+- Auth/profile and legacy decrement helpers have fixed safe search paths and no browser execution;
+  reservation-v1 inventory/orchestration functions are unchanged;
+- historical order, item, address, price, discount, shipment, and bounded payment snapshots remain
+  independent of mutable customer profile/address data.
+
+Current working-tree verification passed a clean replay of all 22 migrations, focused customer and
+checkout-finalization pgTAP tests (85/85), the full database suite (613/613), database lint with zero
+schema errors, local catalog privilege/RLS assertions, nine relevant Deno tests, and type checks for
+the checkout creation, webhook, and reconciliation functions. The local security advisor reported
+no customer/account finding; its sole warning is the pre-existing out-of-scope placement of `pg_net`
+in `public`. This evidence is local only and does not establish deployment or production runtime
+behavior.
 
 ## Reservation-v1 Matrix
 
@@ -299,11 +333,21 @@ ADR-0001 remains the authority for reservation-owned checkout finalization and l
 
 ## Exact Next Action
 
-Perform a final read-only pre-push review of the two local Model B provenance commits. If approved,
-push only under separate authorization. Then use a separate non-production task to verify
-fine-grained token project scoping and prove present/absent DELETE idempotency without secret-read
-permission; review deployment-time IAM simulation and change-set evidence before any production
-deployment. In parallel, establish tested two-human account recovery, verify Dexter's Stripe
-incident/refund/fulfilment authority, and complete SNS-backed external alert delivery with
-purpose-specific credentials. Require a separate global-enable decision after every launch gate
-closes. Global reservations remain off.
+Complete the corrected documentation/provenance re-review for the customer/account database
+foundation, which is the active development workstream. Its local implementation and substantive
+technical review are complete, but the seven-file change remains unstaged, uncommitted, undeployed,
+and unapplied to live Supabase. If the corrected provenance review is approved, proceed only through
+a separate commit-authorisation gate for those reviewed customer/account foundation changes.
+
+### Model B / Launch-Readiness Follow-up — OPEN / PAUSED
+
+The Model B workstream remains open but is currently paused pending AWS granting the required SNS
+Production access. The previous final read-only pre-push review of the local Model B provenance
+commits has already been completed and should not be repeated without a new evidence need. When the
+AWS dependency is resolved, resume with a separate non-production task to verify fine-grained
+Supabase token project scoping and prove present/absent DELETE idempotency without secret-read
+permission; then review deployment-time IAM simulation and CloudFormation/change-set evidence before
+any production deployment. In parallel, complete tested two-human account recovery, verify Dexter's
+Stripe incident/refund/fulfilment authority, and complete SNS-backed external alert delivery using
+purpose-specific credentials. A separate explicit global-reservation enablement decision remains
+required after all launch gates close. Global reservations remain OFF.

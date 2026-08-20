@@ -53,6 +53,78 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-20 — Customer/Account Database Foundation Implemented and Verified Locally
+
+**Record type:** LOCAL UNCOMMITTED MIGRATION, DATABASE, SECURITY AND REGRESSION EVIDENCE
+
+**Evidence grade:** CURRENT WORKING TREE ONLY; NO DEPLOYMENT OR PRODUCTION RUNTIME PROOF
+
+**Status:** IMPLEMENTED AND LOCALLY VERIFIED / NOT DEPLOYED / UNCOMMITTED
+
+Work began from clean `main` at `b49a759aa4666fd70089ef8c460afd959dc5fc0b`, with nothing staged.
+Repository preflight reconfirmed that `public.profiles` had no runtime caller, the two legacy
+inventory decrement helpers had no active repository caller, and the existing checkout paths use
+`customer_profiles`, `stripe_customer_id`, and `orders.user_id` in the boundaries documented by the
+preceding read-only investigation. Local catalog preflights found zero `profiles` rows, zero
+duplicate non-null Stripe customer IDs, and no users with duplicate shipping or billing defaults.
+
+The current working tree adds migration `20260824120500_customer_account_foundation.sql`. It locks
+the inspected legacy/profile/address tables before its destructive-data and uniqueness checks; it
+fails closed on unexpected legacy profile rows, duplicate Stripe linkage, or duplicate defaults.
+It then:
+
+- backfills a missing `customer_profiles` row for each Auth user without claiming any order;
+- hardens the Auth profile trigger with a fixed empty search path, fully qualified privileged
+  references, browser execution revocation, authoritative email synchronization, and preservation
+  of customer-edited names;
+- limits authenticated profile updates to `first_name`, `last_name`, and `phone`, leaving email,
+  Stripe linkage, identity, and timestamps server-managed while preserving service-role access;
+- enforces unique non-null `stripe_customer_id` and one shipping/default billing address per user;
+- retains own-row address CRUD while preventing browser ownership and timestamp mutation;
+- replaces duplicate/email-derived order, item, and shipment access with explicit Auth ownership,
+  `orders.user_id = auth.uid()`, leaving guest orders unclaimed and historical transaction fields
+  unchanged;
+- fixes the search path and browser execution privileges of the two unused legacy inventory
+  decrement helpers without changing their inventory semantics; and
+- drops the empty unused `public.profiles` table with `RESTRICT`.
+
+The first focused pgTAP execution stopped after 20 assertions because the test used a nested
+data-modifying CTE shape rejected by PostgreSQL. This was test-shape evidence, not a schema-policy
+failure. The fixtures were corrected to perform the RLS mutations directly and assert their effects
+separately. The final exact working-tree evidence is:
+
+- clean local replay: all 22 migrations through `20260824120500` applied successfully;
+- focused `customer-account-foundation` plus checkout-finalization pgTAP: 85/85 PASS (59 customer
+  foundation and 26 finalization assertions);
+- full local database suite: 18 files, 613/613 PASS;
+- database lint: PASS, zero schema errors;
+- local migration-history check: all 22 versions present through `20260824120500`;
+- direct local catalog audit: RLS enabled on all five customer/order surfaces, no email-derived
+  policy expressions, exact browser column grants, service-role profile access retained, fixed
+  helper search paths, browser helper execution revoked, and zero Auth users missing a profile;
+- checkout access and paid-session Deno tests: 9/9 PASS;
+- Deno type checks: `create-checkout-session`, `stripe-webhook`, and
+  `reconcile-checkout-reservations` PASS;
+- repository ESLint and targeted Prettier for all changed Markdown: PASS;
+- tracked `git diff --check` and separate no-index whitespace checks for all three untracked files:
+  PASS;
+- the repository-wide `npm run check` did not establish a global formatting pass because its
+  Prettier stage reported four pre-existing, unmodified architecture Markdown files; this slice did
+  not rewrite those unrelated files, and the independent ESLint run passed;
+- local Supabase security advisor: no customer/account findings; one WARN remains for the existing
+  out-of-scope `pg_net` extension in `public` (12 additional INFO findings were unrelated to this
+  slice).
+
+ADR-0002 records `auth.users → customer_profiles` as canonical identity, `orders.user_id` as
+permanent account authorization, email as transaction/possible future claim evidence rather than
+authorization, explicit preservation of unclaimed guest orders, immutable historical snapshots,
+Stripe payment authority, and privileged server ownership of `stripe_customer_id`.
+
+No linked or production Supabase command ran. No live data, Auth user, guest order, Edge Function,
+Webflow surface, Stripe configuration, feature flag, or checkout runtime source changed. Nothing was
+staged, committed, pushed, or deployed. These results apply only to the current uncommitted working
+tree and do not establish live migration or production Auth behavior.
+
 ## 2026-08-19 — Model B Emergency Checkout Rollback Implemented and Verified Locally
 
 **Record type:** LOCAL COMMITTED SOURCE, UNIT, STRUCTURED STATIC IAM AND OFFLINE TEMPLATE EVIDENCE
