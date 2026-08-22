@@ -97,12 +97,13 @@ no customer/account finding; its sole warning is the pre-existing out-of-scope p
 in `public`. This evidence is local only and does not establish deployment or production runtime
 behavior.
 
-## Customer Communication Preference Foundation — Local Only
+## Customer Communication Preference Foundation — Committed Locally / Not Deployed
 
-Migration `20260824120600_customer_preference_persistence.sql` is implemented in the current
-working tree but is not committed, pushed, or applied to production. It adds the proposed database
-foundation without changing customer identity, profile grants, checkout, reservation-v1, Auth
-configuration, Webflow, Stripe, Klaviyo, or any live data:
+Migration `20260824120600_customer_preference_persistence.sql` is implemented, locally verified,
+and committed locally as `02e5112d72791566156ffd39e33bbdf7d62787a2`. That commit has not been
+pushed to `origin/main`, and the migration has not been applied to production. The committed source
+adds the proposed database foundation without changing customer identity, profile grants, checkout,
+reservation-v1, Auth configuration, Webflow, Stripe, Klaviyo, or any live data:
 
 - `customer_preferences` holds one Auth-owned current-state row, with optional order-status updates
   defaulting to enabled and marketing communications defaulting to disabled;
@@ -122,12 +123,16 @@ configuration, Webflow, Stripe, Klaviyo, or any live data:
 - both relations currently cascade with Auth user deletion, subject to a separate retention and
   erasure decision before an account-deletion workflow is designed.
 
-Current working-tree evidence on 2026-08-22 is local only: the revised migration replayed cleanly;
-the focused preference suite passed 76/76; the first-use concurrency harness passed; the unchanged
-customer-account foundation passed 59/59; the full database suite passed 689/689; and Supabase DB
-lint reported no schema errors for `public` or `auth`. This does not establish production
-application, production policy state, Settings UI behavior, delivery-provider enforcement, or live
-customer preference behavior. ADR-0004 records the accepted ownership and evidence architecture.
+Pre-commit local verification evidence recorded on 2026-08-22 established that the revised
+migration replayed cleanly; the focused preference suite passed 76/76; the first-use concurrency
+harness passed; the unchanged customer-account foundation passed 59/59; the full database suite
+passed 689/689; and Supabase DB lint reported no schema errors for `public` or `auth`.
+
+Production migration preflight and production migration authorization remain pending. The Settings
+frontend/runtime is not implemented, the existing Webflow preference switches are not yet persisted
+by TAA Platform, and Klaviyo or other downstream enforcement remains future work. Committed locally
+does not mean pushed or applied to production, and no production preference table or RPC is claimed
+to exist. ADR-0004 records the accepted ownership and evidence architecture.
 
 ## Members Area Phase A — Authentication Foundation
 
