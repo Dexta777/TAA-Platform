@@ -97,14 +97,14 @@ no customer/account finding; its sole warning is the pre-existing out-of-scope p
 in `public`. This evidence is local only and does not establish deployment or production runtime
 behavior.
 
-## Customer Communication Preference Foundation — Pushed / Not Applied
+## Customer Communication Preference Foundation — Production Applied / Settings Pending
 
 Migration `20260824120600_customer_preference_persistence.sql` is implemented, locally verified,
 and committed as `02e5112d72791566156ffd39e33bbdf7d62787a2`. That implementation was pushed
-successfully to `origin/main`, which now includes the preference foundation. The migration has not
-been applied to production. The pushed source adds the proposed database foundation without
-changing customer identity, profile grants, checkout, reservation-v1, Auth configuration, Webflow,
-Stripe, Klaviyo, or any live data:
+successfully to `origin/main` and was subsequently applied and verified on production Supabase
+project `zxmywtmjvfjgdjcstgtn`. Production now contains `public.customer_preferences`,
+`public.customer_preference_events`, and
+`public.set_customer_preference_v1(text, boolean, text)`:
 
 - `customer_preferences` holds one Auth-owned current-state row, with optional order-status updates
   defaulting to enabled and marketing communications defaulting to disabled;
@@ -117,6 +117,9 @@ Stripe, Klaviyo, or any live data:
 - `set_customer_preference_v1` is the authenticated-only atomic mutation boundary, derives the Auth
   user and audit fields on the server, serializes concurrent first use, and creates no event for a
   same-value request;
+- the deployed RPC is owned by `postgres`, remains `SECURITY DEFINER` with a fixed empty
+  `search_path`, grants exact-signature execution only to `authenticated`, and grants no execution
+  to `PUBLIC`, `anon`, or `service_role`;
 - marketing transitions require the current compatibility handshake while the database records its
   own `account-settings-marketing-v1` notice constant;
 - browsers can select only their own current state and cannot write either table directly or read
@@ -129,11 +132,18 @@ migration replayed cleanly; the focused preference suite passed 76/76; the first
 harness passed; the unchanged customer-account foundation passed 59/59; the full database suite
 passed 689/689; and Supabase DB lint reported no schema errors for `public` or `auth`.
 
-Production migration preflight and production migration authorization remain pending. The Settings
-frontend/runtime is not implemented, the existing Webflow preference switches are not yet persisted
-by TAA Platform, and Klaviyo or other downstream enforcement remains future work. Pushed to the
-repository does not mean applied to production, and no production preference table or RPC is claimed
-to exist. ADR-0004 records the accepted ownership and evidence architecture.
+Production verification established the ADR-0004 RLS and grant surface, with immediate
+post-application row counts of zero for both preference tables. The RPC was not invoked. Auth users,
+customer profiles, orders, order items, shipments, checkout attempts and intents, inventory
+reservations, and Stripe linkage retained their pre-application counts and row-version fingerprints.
+The migration itself created no preference state or event evidence and did not mutate those existing
+data boundaries.
+
+The Settings frontend/runtime is not implemented, the existing Webflow preference switches are not
+yet persisted by TAA Platform, and Klaviyo or other downstream enforcement remains future work.
+Essential transactional communications remain outside preference control. The database foundation
+being live does not mean the Settings feature or downstream marketing enforcement is live. ADR-0004
+records the accepted ownership and evidence architecture.
 
 ## Members Area Phase A — Authentication Foundation
 

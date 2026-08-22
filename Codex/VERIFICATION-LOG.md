@@ -53,6 +53,61 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-22 — Customer Preference Persistence Foundation Applied and Verified in Production
+
+**Record type:** AUTHORIZED PRODUCTION MIGRATION APPLICATION, CATALOG, SECURITY AND DATA-BOUNDARY EVIDENCE
+
+**Evidence grade:** PRODUCTION SCHEMA AND IMMEDIATE POST-APPLICATION VERIFICATION; NO SETTINGS RUNTIME OR CUSTOMER-INTERACTION PROOF
+
+**Status:** PRODUCTION MIGRATION APPLIED AND VERIFIED / DATABASE FOUNDATION LIVE / SETTINGS FEATURE NOT LIVE
+
+The explicitly authorized production gate applied
+`20260824120600_customer_preference_persistence.sql` to Supabase project
+`zxmywtmjvfjgdjcstgtn`. Repository HEAD was
+`c58154310bfaaf71935e6a39f27c7a358f031be8`, and the committed migration SHA-256 was
+`c255e85e102ca24594b87427c98a13f56a531d928d6e5deb4c2a3464d8f2f935`.
+
+The repository-locked Supabase CLI was version `2.113.0`. Its linked dry run identified exactly the
+target migration with zero seeds and zero roles. The subsequent `db push --linked` exited 0 and
+reported exactly that migration applied, again with zero seeds and zero roles. Fresh migration
+history contained 23 entries and ended at `20260824120600_customer_preference_persistence`.
+
+Immediate production catalog verification established:
+
+- `public.customer_preferences`, `public.customer_preference_events`, the event identity sequence,
+  ordered-history index, updated-at trigger, own-row preference policy, expected constraints, and
+  `public.set_customer_preference_v1(text, boolean, text)` exist;
+- the deployed RPC body exactly matched the committed body, is owned by `postgres`, is
+  `SECURITY DEFINER`, has a fixed empty `search_path`, and contains the server-owned
+  `account-settings-marketing-v1` notice version;
+- only `authenticated` can execute the exact RPC signature; `PUBLIC`, `anon`, and `service_role`
+  cannot execute it;
+- RLS is enabled on both tables; authenticated customers can select only their own current state,
+  have no direct table mutation privilege or event-history access, and routine service-role table
+  access is SELECT-only;
+- routine roles cannot allocate or manipulate the event identity sequence.
+
+The RPC was not invoked. Immediate post-application counts were zero
+`customer_preferences` rows and zero `customer_preference_events` rows. Auth users and customer
+profiles remained 1/1, with zero users missing profiles and zero profiles missing users. Counts and
+non-PII row-version fingerprints remained unchanged for Auth users, customer profiles, orders,
+order items, shipments, checkout attempts, checkout intents, and inventory reservations; Stripe
+profile linkage also remained unchanged. Verification therefore created no preference row or event
+and found no mutation across those existing data boundaries.
+
+Linked database lint found no schema errors. Fresh advisors found no material new preference
+security defect. They reported the intentional RLS-enabled/no-policy deny-all state for
+`customer_preference_events`, the intentional authenticated `SECURITY DEFINER` RPC boundary, and an
+expected immediate unused-index observation for the empty history table. Pre-existing unrelated
+advisor findings remained out of scope and were not remediated.
+
+This evidence proves application of the reviewed migration and its immediate production schema,
+privilege, RLS, zero-row, and data-boundary state. It does not prove that the preference RPC works
+through TAA runtime, that Settings UI persistence exists, that a customer preference has been
+changed, or that Klaviyo or another downstream system enforces the stored state. No Auth
+configuration, user, email, Webflow, Edge Function, Stripe, Klaviyo, or other external system was
+mutated by migration verification.
+
 ## 2026-08-22 — Customer Preference Persistence Foundation Verified Locally
 
 **Record type:** LOCAL UNCOMMITTED MIGRATION, PGTAP, CONCURRENCY AND DATABASE-LINT EVIDENCE
