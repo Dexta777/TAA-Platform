@@ -97,6 +97,38 @@ no customer/account finding; its sole warning is the pre-existing out-of-scope p
 in `public`. This evidence is local only and does not establish deployment or production runtime
 behavior.
 
+## Customer Communication Preference Foundation — Local Only
+
+Migration `20260824120600_customer_preference_persistence.sql` is implemented in the current
+working tree but is not committed, pushed, or applied to production. It adds the proposed database
+foundation without changing customer identity, profile grants, checkout, reservation-v1, Auth
+configuration, Webflow, Stripe, Klaviyo, or any live data:
+
+- `customer_preferences` holds one Auth-owned current-state row, with optional order-status updates
+  defaulting to enabled and marketing communications defaulting to disabled;
+- the same true/false meanings apply when a customer has no preference row;
+- essential confirmations, receipts, fulfilment-critical notices, account/security messages, and
+  legally or operationally necessary service communications are outside preference control;
+- `customer_preference_events` records append-only, server-authored evidence for real state
+  transitions and stores no email, IP address, user agent, fingerprint, credential, or duplicated
+  profile data;
+- `set_customer_preference_v1` is the authenticated-only atomic mutation boundary, derives the Auth
+  user and audit fields on the server, serializes concurrent first use, and creates no event for a
+  same-value request;
+- marketing transitions require the current compatibility handshake while the database records its
+  own `account-settings-marketing-v1` notice constant;
+- browsers can select only their own current state and cannot write either table directly or read
+  event history; routine service-role access is read-only;
+- both relations currently cascade with Auth user deletion, subject to a separate retention and
+  erasure decision before an account-deletion workflow is designed.
+
+Current working-tree evidence on 2026-08-22 is local only: the revised migration replayed cleanly;
+the focused preference suite passed 76/76; the first-use concurrency harness passed; the unchanged
+customer-account foundation passed 59/59; the full database suite passed 689/689; and Supabase DB
+lint reported no schema errors for `public` or `auth`. This does not establish production
+application, production policy state, Settings UI behavior, delivery-provider enforcement, or live
+customer preference behavior. ADR-0004 records the accepted ownership and evidence architecture.
+
 ## Members Area Phase A — Authentication Foundation
 
 The pushed Phase A series through `92dbfc7900ef15ffa48ca6a7134a1c1d35fb9d40` implements the

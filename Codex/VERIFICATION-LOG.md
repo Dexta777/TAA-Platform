@@ -53,6 +53,45 @@ selecting whichever conclusion appears most convenient.
 
 # Verification Records
 
+## 2026-08-22 — Customer Preference Persistence Foundation Verified Locally
+
+**Record type:** LOCAL UNCOMMITTED MIGRATION, PGTAP, CONCURRENCY AND DATABASE-LINT EVIDENCE
+
+**Evidence grade:** CURRENT WORKING TREE AND LOCAL SUPABASE ONLY; NO PRODUCTION MIGRATION OR RUNTIME PROOF
+
+**Status:** IMPLEMENTED AND LOCALLY VERIFIED / NOT COMMITTED / NOT APPLIED TO PRODUCTION
+
+The current working tree adds `20260824120600_customer_preference_persistence.sql`, focused pgTAP
+coverage, a same-customer concurrent first-use harness, and ADR-0004. The migration replayed from a
+clean local Supabase reset through all 23 repository migrations. It creates Auth-owned current
+preference state, append-only transition evidence, and a narrowly granted atomic SECURITY DEFINER
+RPC. No production connection or mutation was used.
+
+Final current-working-tree verification on 2026-08-22 established:
+
+- focused customer preference pgTAP suite: 76/76 PASS;
+- concurrent first preference use: PASS, with the competing caller observed waiting and the final
+  database state containing one current row plus one truthful transition event;
+- existing customer-account foundation pgTAP suite: 59/59 PASS;
+- full database pgTAP suite: 19 files, 689/689 PASS;
+- local Supabase database lint for `public` and `auth`: PASS, zero schema errors;
+- clean local migration replay: PASS through
+  `20260824120600_customer_preference_persistence.sql`.
+
+Two intermediate focused runs were intentionally not hidden: the first stopped after 22 assertions
+because the test treated PostgreSQL's `PUBLIC` pseudo-role as a login role; the assertion was
+replaced with direct ACL inspection. The second ran 75 assertions and exposed that a nullable SQL
+`CHECK` branch did not reject a missing marketing notice version; the constraint was corrected to
+require a non-null authoritative version. The final reset and verification results above apply to
+the corrected working tree.
+
+This evidence proves local schema replay, focused behavior, privilege boundaries, append-only
+controls, and the tested concurrency case. It does not prove production preflight safety,
+production migration application, Settings UI behavior, Webflow integration, Klaviyo enforcement,
+or live customer behavior. No production migration was applied; no live database, Auth
+configuration, Webflow, email, Edge Function, Stripe, or Klaviyo system was mutated; and nothing
+was staged, committed, or pushed.
+
 ## 2026-08-20 — Published Auth Contract and Final Webflow Runtime State Reconciled
 
 **Record type:** CURRENT READ-ONLY WEBFLOW CONFIGURATION, PUBLISHED HTML AND ASSET EVIDENCE

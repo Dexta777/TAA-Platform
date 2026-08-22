@@ -142,6 +142,7 @@ Rectification:
 - [ADR-0001 — Reservation-Owned Checkout Finalization](ADR-0001-reservation-owned-checkout-finalization.md)
 - [ADR-0002 — Customer Identity and Order Ownership](ADR-0002-customer-identity-and-order-ownership.md)
 - [ADR-0003 — Members Area Authentication](ADR-0003-members-area-authentication.md)
+- [ADR-0004 — Customer Communication Preference Ownership](ADR-0004-customer-communication-preference-ownership.md)
 
 ---
 
