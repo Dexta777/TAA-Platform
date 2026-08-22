@@ -97,13 +97,14 @@ no customer/account finding; its sole warning is the pre-existing out-of-scope p
 in `public`. This evidence is local only and does not establish deployment or production runtime
 behavior.
 
-## Customer Communication Preference Foundation — Committed Locally / Not Deployed
+## Customer Communication Preference Foundation — Pushed / Not Applied
 
 Migration `20260824120600_customer_preference_persistence.sql` is implemented, locally verified,
-and committed locally as `02e5112d72791566156ffd39e33bbdf7d62787a2`. That commit has not been
-pushed to `origin/main`, and the migration has not been applied to production. The committed source
-adds the proposed database foundation without changing customer identity, profile grants, checkout,
-reservation-v1, Auth configuration, Webflow, Stripe, Klaviyo, or any live data:
+and committed as `02e5112d72791566156ffd39e33bbdf7d62787a2`. That implementation was pushed
+successfully to `origin/main`, which now includes the preference foundation. The migration has not
+been applied to production. The pushed source adds the proposed database foundation without
+changing customer identity, profile grants, checkout, reservation-v1, Auth configuration, Webflow,
+Stripe, Klaviyo, or any live data:
 
 - `customer_preferences` holds one Auth-owned current-state row, with optional order-status updates
   defaulting to enabled and marketing communications defaulting to disabled;
@@ -130,8 +131,8 @@ passed 689/689; and Supabase DB lint reported no schema errors for `public` or `
 
 Production migration preflight and production migration authorization remain pending. The Settings
 frontend/runtime is not implemented, the existing Webflow preference switches are not yet persisted
-by TAA Platform, and Klaviyo or other downstream enforcement remains future work. Committed locally
-does not mean pushed or applied to production, and no production preference table or RPC is claimed
+by TAA Platform, and Klaviyo or other downstream enforcement remains future work. Pushed to the
+repository does not mean applied to production, and no production preference table or RPC is claimed
 to exist. ADR-0004 records the accepted ownership and evidence architecture.
 
 ## Members Area Phase A — Authentication Foundation
